@@ -118,7 +118,7 @@ def list_players():
                 "games": p.stats.get("games"),
                 "decisions": p.stats.get("decisions"),
                 "heldout_games": len(p.heldout),
-                "top1": (ev.get("personal_with_book") or {}).get("top1"),
+                "top1": (ev.get("personal_with_book") or ev.get("personal") or {}).get("top1"),
                 "engine": p.engine,
             }
         )

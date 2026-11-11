@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CogniCheck</title>
+  <meta name="theme-color" content="#000000">
+  <link rel="preload" href="/static/fonts/archivo-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -18,6 +20,16 @@
     </nav>
     <div id="engine-badge" class="badge"></div>
   </header>
+
+  <section class="hero" id="hero" aria-label="CogniCheck">
+    <canvas id="field" aria-hidden="true"></canvas>
+    <div class="hint">click the field</div>
+    <div class="plate">
+      <h1>Predict the player.<br>Not the move.</h1>
+      <p>Personal move models, blind spots and a map of how real players think.</p>
+    </div>
+    <div class="legend-field">? missed &nbsp;·&nbsp; ! seen</div>
+  </section>
 
   <main>
     <!-- PLAYERS ---------------------------------------------------------->

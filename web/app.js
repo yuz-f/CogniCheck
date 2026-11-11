@@ -104,13 +104,14 @@ class Board {
   }
 }
 
-const COLORS = { actual: "#1f8a4c", model: "#2f6fde", guess: "#e07b18", threat: "#c2412d" };
+const COLORS = { actual: "#f2f2f2", model: "#ff1f1f", guess: "#a66bff", threat: "#ff1f1f" };
 
 // -------------------------------------------------------------------- views
 let players = [];
 let currentPlayer = null;
 
 function showView(name) {
+  $("#hero").classList.toggle("hidden", name !== "players");
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${name}`));
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   if (name === "analyse") analyse.refresh();
@@ -154,8 +155,8 @@ async function selectPlayer(id) {
   const p = await api(`/api/players/${id}`);
   const ev = p.evaluation || {};
   const acc = [
-    ["This player's model", ev.personal_with_book],
-    ["…without opening book", ev.personal],
+    ["This player's model", ev.personal_with_book || ev.personal],
+    ...(ev.personal_with_book ? [["…without opening book", ev.personal]] : []),
     ["Average-player model", ev.population],
     ["Stockfish top move", ev.engine_top_move],
     ["Random legal move", ev.random],
@@ -474,7 +475,7 @@ const live = {
 };
 
 // --------------------------------------------------------------------- map
-const TYPE_COLORS = ["#2f6fde", "#e07b18", "#1f8a4c", "#a43fb5", "#c2412d", "#5b6b7a"];
+const TYPE_COLORS = ["#ff1f1f", "#f2f2f2", "#a66bff", "#4d8bff", "#ff8fb8", "#8a8a8a"];
 const map = {
   data: null, sel: null,
   async load() {
@@ -499,19 +500,19 @@ const map = {
   render() {
     const d = this.data; if (!d) return;
     const xi = +$("#map-x").value, yi = +$("#map-y").value;
-    const W = 640, H = 520, pad = 46;
+    const W = 640, H = 560, pad = 46, padB = 76;
     const xs = d.players.map((p) => p.pc[xi]), ys = d.players.map((p) => p.pc[yi]);
     const ext = (a) => { const m = Math.max(...a.map(Math.abs)) * 1.1 || 1; return [-m, m]; };
     const [x0, x1] = ext(xs), [y0, y1] = ext(ys);
-    const sx = (v) => pad + ((v - x0) / (x1 - x0)) * (W - 2 * pad), sy = (v) => H - pad - ((v - y0) / (y1 - y0)) * (H - 2 * pad);
+    const sx = (v) => pad + ((v - x0) / (x1 - x0)) * (W - 2 * pad), sy = (v) => H - padB - ((v - y0) / (y1 - y0)) * (H - pad - padB);
     const cx = d.components[xi], cy = d.components[yi];
     const ax = this.axisName(cx), ay = this.axisName(cy);
     let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Player map">
-      <line class="axis" x1="${pad}" y1="${sy(0)}" x2="${W - pad}" y2="${sy(0)}"/><line class="axis" x1="${sx(0)}" y1="${pad}" x2="${sx(0)}" y2="${H - pad}"/>
-      <text x="${W - pad}" y="${sy(0) - 6}" text-anchor="end">→ ${esc(ax.pos)}</text>
-      <text x="${pad}" y="${sy(0) - 6}">← ${esc(ax.neg)}</text>
-      <text x="${sx(0) + 6}" y="${pad - 8}">↑ ${esc(ay.pos)}</text>
-      <text x="${sx(0) + 6}" y="${H - pad + 18}">↓ ${esc(ay.neg)}</text>`;
+      <line class="axis" x1="${pad}" y1="${sy(0)}" x2="${W - pad}" y2="${sy(0)}"/><line class="axis" x1="${sx(0)}" y1="${pad}" x2="${sx(0)}" y2="${H - padB}"/>
+      <text x="${pad}" y="16">↑ PC${yi + 1}: ${esc(ay.pos)}</text>
+      <text x="${pad}" y="${H - 44}">↓ ${esc(ay.neg)}</text>
+      <text x="${pad}" y="${H - 26}">← PC${xi + 1}: ${esc(ax.neg)}</text>
+      <text x="${W - pad}" y="${H - 8}" text-anchor="end">${esc(ax.pos)} →</text>`;
     d.players.forEach((p, i) => {
       const r = 4 + ((p.rating - 800) / 2200) * 5;
       if (p.added) svg += `<circle cx="${sx(p.pc[xi]).toFixed(1)}" cy="${sy(p.pc[yi]).toFixed(1)}" r="${(Math.max(3, r) + 4).toFixed(1)}" fill="none" stroke="var(--ink)" stroke-width="1.5"/><text x="${(sx(p.pc[xi]) + Math.max(3, r) + 6).toFixed(1)}" y="${(sy(p.pc[yi]) + 4).toFixed(1)}" style="fill:var(--ink);font-weight:600">${esc(p.name)}</text>`;
@@ -547,11 +548,66 @@ const map = {
   },
 };
 
+// ------------------------------------------------------------ the field
+// A field of annotation marks: "?" (missed) on red, "!" (seen) on black.
+// Smooth value noise drifts over time; a click sends a ring that flips cells.
+const field = {
+  cell: 22, waves: [], t: 0, running: true,
+  init() {
+    const c = $("#field");
+    if (!c) return;
+    this.c = c; this.ctx = c.getContext("2d");
+    this.reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const resize = () => {
+      const r = c.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
+      c.width = Math.max(1, r.width * dpr); c.height = Math.max(1, r.height * dpr);
+      this.dpr = dpr; this.cols = Math.ceil(r.width / this.cell) + 1; this.rows = Math.ceil(r.height / this.cell) + 1;
+      this.draw();
+    };
+    window.addEventListener("resize", resize);
+    resize();
+    c.addEventListener("click", (e) => {
+      const r = c.getBoundingClientRect();
+      this.waves.push({ x: (e.clientX - r.left) / this.cell, y: (e.clientY - r.top) / this.cell, t0: this.t });
+      if (this.reduce) this.draw();
+    });
+    new IntersectionObserver(([en]) => { this.running = en.isIntersecting; }).observe(c);
+    if (!this.reduce) { const loop = () => { if (this.running && !document.hidden) { this.t += 0.016; this.draw(); } requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
+  },
+  hash(x, y, z) { let h = x * 374761393 + y * 668265263 + z * 2147483647; h = (h ^ (h >>> 13)) * 1274126177; return ((h ^ (h >>> 16)) >>> 0) / 4294967295; },
+  noise(x, y, z) {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z), xf = x - xi, yf = y - yi, zf = z - zi;
+    const s = (t) => t * t * (3 - 2 * t), u = s(xf), v = s(yf), w = s(zf);
+    const L = (a, b, t) => a + (b - a) * t, H = (a, b, c) => this.hash(xi + a, yi + b, zi + c);
+    return L(L(L(H(0,0,0), H(1,0,0), u), L(H(0,1,0), H(1,1,0), u), v), L(L(H(0,0,1), H(1,0,1), u), L(H(0,1,1), H(1,1,1), u), v), w);
+  },
+  draw() {
+    const { ctx, cell, dpr } = this;
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, this.c.width, this.c.height);
+    ctx.font = `700 ${Math.round(cell * 0.5)}px "JetBrains Mono", monospace`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    this.waves = this.waves.filter((w) => this.t - w.t0 < 4);
+    const z = this.t * 0.25;
+    for (let y = 0; y < this.rows; y++) for (let x = 0; x < this.cols; x++) {
+      let on = this.noise(x * 0.11, y * 0.16, z) + 0.5 * this.noise(x * 0.3, y * 0.4, z * 1.7) > 0.95;
+      for (const w of this.waves) {
+        const d = Math.hypot(x - w.x, y - w.y), front = (this.t - w.t0) * 22;
+        if (Math.abs(d - front) < 1.6) on = !on;
+      }
+      const px = x * cell, py = y * cell;
+      if (on) { ctx.fillStyle = "#ff1f1f"; ctx.fillRect(px, py, cell, cell); ctx.fillStyle = "#000"; ctx.fillText("?", px + cell / 2, py + cell / 2 + 1); }
+      else { ctx.fillStyle = "rgba(255,31,31,.38)"; ctx.fillText("!", px + cell / 2, py + cell / 2 + 1); }
+    }
+  },
+};
+
 // -------------------------------------------------------------------- boot
 (async function boot() {
   play.init();
   analyse.init();
   live.init();
+  field.init();
   try {
     const h = await api("/api/health");
     $("#engine-badge").textContent = h.engine ? "Stockfish: on" : "Stockfish: off (heuristics only)";
