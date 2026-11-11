@@ -34,6 +34,8 @@
               <label>or Chess.com username <input id="chesscom-user"></label>
               <label>or paste PGN <textarea id="pgn-text" rows="5" placeholder="[Event ...]"></textarea></label>
               <label>Player name in the PGN (optional) <input id="pgn-player"></label>
+              <label>Rating (only needed for PGN / Chess.com if the PGN has no Elo) <input id="add-rating" type="number" min="100" max="3500"></label>
+              <label class="toggle"><input type="checkbox" id="add-map" checked> also place this player on the cognition map (PCA)</label>
               <label>PGN file <input id="pgn-file" type="file" accept=".pgn,text/plain"></label>
               <button id="build-btn" class="primary">Build profile</button>
               <div id="build-status" class="muted"></div>

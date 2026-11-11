@@ -132,7 +132,7 @@ def fetch_games(n_games: int = 60) -> None:
 
 
 # ----------------------------------------------------------------- analyse
-def _analyse_player(pid: str, username: str, depth: int) -> str:
+def _analyse_player(pid: str, username: str, depth: int, progress=None) -> str:
     from .engine import Engine, find_stockfish
     from .profile import blind_spot_stats, engine_refutations, iter_decisions
 
@@ -145,6 +145,8 @@ def _analyse_player(pid: str, username: str, depth: int) -> str:
         decisions = []
         for gi, pg in enumerate(games):
             decisions.extend(iter_decisions(pg, gi, engine))
+            if progress:
+                progress(gi + 1, len(games))
     finally:
         if engine:
             engine.close()
@@ -198,11 +200,8 @@ def _engine_stats(ds: model.Dataset) -> dict:
     return {"engine_match": float((loss <= 0.1).mean()), "avg_loss_pawns": float(loss.mean()), "blunder_rate": float((loss >= 2).mean())}
 
 
-def fit_all(lam: float = 0.01, holdout_frac: float = 0.15) -> None:
-    from .profile import Profile, build_book, slugify, style_summary
-
-    players = [p for p in json.loads(PLAYERS.read_text()) if (ANALYSIS / f"{p['id']}.npz").exists()]
-    # Population prior: equal number of positions from every player.
+def train_population(players: list[dict]) -> np.ndarray:
+    """Population prior: an equal number of positions from every player."""
     rng = np.random.default_rng(0)
     pooled = []
     for p in players:
@@ -213,52 +212,183 @@ def fit_all(lam: float = 0.01, holdout_frac: float = 0.15) -> None:
     prior = model.fit(big, lam=1e-3)
     POPULATION_REAL.write_text(json.dumps({"feature_names": FEATURE_NAMES, "weights": [float(x) for x in prior], "positions": len(big), "players": len(players)}, indent=1))
     print(f"population prior from {len(big)} positions of {len(players)} players", file=sys.stderr)
+    return prior
 
+
+def load_population() -> np.ndarray:
+    if not POPULATION_REAL.exists():
+        raise RuntimeError("no real-player population yet - run: python -m cognicheck cohort all")
+    from .profile import load_prior
+
+    return load_prior(POPULATION_REAL)
+
+
+def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: float = 0.15):
+    """Personal model (all games + two halves), evaluation, profile and cognition vector."""
+    from .profile import Profile, build_book, slugify, style_summary
+
+    ds, game = _load_ds(p["id"])
+    extra = json.loads((ANALYSIS / f"{p['id']}.json").read_text())
+    n_games = extra["games"]
+    hold = set(range(n_games)[: max(1, int(round(n_games * holdout_frac)))])
+    train_mask = np.array([g not in hold for g in game])
+    ds_train, ds_test = _subset(ds, train_mask), _subset(ds, ~train_mask)
+    w_eval = model.fit(ds_train, prior=prior, lam=lam)
+    ev = {
+        "personal": model.evaluate(ds_test, w_eval),
+        "population": model.evaluate(ds_test, prior),
+    }
+    loss_test = ds_test.X[:, IDX["eng_loss"]]
+    ends = np.append(ds_test.starts[1:], len(ds_test.X))
+    ev["engine_top_move"] = {"top1": float(np.mean([loss_test[c] == loss_test[s:e].min() for s, e, c in zip(ds_test.starts, ends, ds_test.chosen)]))}
+    ev["random"] = {"top1": float(np.mean(1.0 / np.diff(np.append(ds_test.starts, len(ds_test.X)))))}
+    masks = {"all": np.ones(len(ds), bool), "A": game % 2 == 0, "B": game % 2 == 1}
+    fits = {k: model.fit(_subset(ds, m), prior=prior, lam=lam) for k, m in masks.items()}
+    vectors = {k: cognition_vector(fits[k], prior, extra[k]["blind_spots"], _engine_stats(_subset(ds, masks[k]))) for k in fits}
+    # Full profile for the web app (book + held-out games from the PGN).
+    pgs = games_of(parse_pgn((GAMES / f"{p['id']}.pgn").read_text()), p["username"])
+    prof = Profile(
+        id=slugify(p["id"]),
+        name=p["username"],
+        weights=fits["all"],
+        prior=prior,
+        book=build_book([g for i, g in enumerate(pgs) if i not in hold]),
+        blind_spots=extra["all"]["blind_spots"],
+        refutations=extra["all"]["refutations"],
+        style=style_summary(fits["all"], prior),
+        evaluation=ev,
+        heldout=[g.pgn() for i, g in enumerate(pgs) if i in hold],
+        stats={"games": n_games, "decisions": len(ds), "white_games": extra["white_games"], "black_games": n_games - extra["white_games"], "rating": p["rating"], "source": p.get("source", "lichess blitz")} | {k: round(v, 3) for k, v in _engine_stats(ds).items()},
+        engine=True,
+    )
     PROFILES_REAL.mkdir(parents=True, exist_ok=True)
+    prof.save(PROFILES_REAL)
+    (ANALYSIS / f"{p['id']}.vec.json").write_text(json.dumps({"id": prof.id, "name": p["username"], "rating": p["rating"], "added": bool(p.get("added")), "source": p.get("source", "lichess blitz"), "evaluation": ev, "vectors": vectors}))
+    return prof
+
+
+def fit_all(lam: float = 0.01, holdout_frac: float = 0.15) -> None:
+    players = [p for p in json.loads(PLAYERS.read_text()) if (ANALYSIS / f"{p['id']}.npz").exists()]
+    cohort_players = [p for p in players if not p.get("added")] or players
+    prior = train_population(cohort_players)
     for p in players:
-        ds, game = _load_ds(p["id"])
-        extra = json.loads((ANALYSIS / f"{p['id']}.json").read_text())
-        n_games = extra["games"]
-        hold = set(range(n_games)[: max(1, int(round(n_games * holdout_frac)))])
-        train_mask = np.array([g not in hold for g in game])
-        ds_train, ds_test = _subset(ds, train_mask), _subset(ds, ~train_mask)
-        w_eval = model.fit(ds_train, prior=prior, lam=lam)
-        ev = {
-            "personal": model.evaluate(ds_test, w_eval),
-            "population": model.evaluate(ds_test, prior),
-        }
-        loss_test = ds_test.X[:, IDX["eng_loss"]]
-        ends = np.append(ds_test.starts[1:], len(ds_test.X))
-        ev["engine_top_move"] = {"top1": float(np.mean([loss_test[c] == loss_test[s:e].min() for s, e, c in zip(ds_test.starts, ends, ds_test.chosen)]))}
-        ev["random"] = {"top1": float(np.mean(1.0 / np.diff(np.append(ds_test.starts, len(ds_test.X)))))}
-        fits = {
-            "all": model.fit(ds, prior=prior, lam=lam),
-            "A": model.fit(_subset(ds, game % 2 == 0), prior=prior, lam=lam),
-            "B": model.fit(_subset(ds, game % 2 == 1), prior=prior, lam=lam),
-        }
-        vectors = {
-            k: cognition_vector(fits[k], prior, extra[k]["blind_spots"], _engine_stats(_subset(ds, (game % 2 == (0 if k == "A" else 1)) if k != "all" else np.ones(len(ds), bool))))
-            for k in fits
-        }
-        # Full profile for the web app (book + held-out games from the PGN).
-        pgs = games_of(parse_pgn((GAMES / f"{p['id']}.pgn").read_text()), p["username"])
-        prof = Profile(
-            id=slugify(p["username"]),
-            name=p["username"],
-            weights=fits["all"],
-            prior=prior,
-            book=build_book([g for i, g in enumerate(pgs) if i not in hold]),
-            blind_spots=extra["all"]["blind_spots"],
-            refutations=extra["all"]["refutations"],
-            style=style_summary(fits["all"], prior),
-            evaluation=ev,
-            heldout=[g.pgn() for i, g in enumerate(pgs) if i in hold],
-            stats={"games": n_games, "decisions": len(ds), "white_games": extra["white_games"], "black_games": n_games - extra["white_games"], "rating": p["rating"], "source": "lichess blitz"} | {k: round(v, 3) for k, v in _engine_stats(ds).items()},
-            engine=True,
-        )
-        prof.save(PROFILES_REAL)
-        (ANALYSIS / f"{p['id']}.vec.json").write_text(json.dumps({"id": prof.id, "name": p["username"], "rating": p["rating"], "evaluation": ev, "vectors": vectors}))
+        fit_player(p, prior, lam, holdout_frac)
     print(f"fitted {len(players)} players", file=sys.stderr)
+
+
+# --------------------------------------------------------------- add player
+import threading as _threading
+
+_ADD_LOCK = _threading.Lock()  # one analysis + PCA rewrite at a time
+def _lichess_rating(username: str, perf: str = "blitz") -> tuple[str, str, int, int]:
+    users = json.loads(_get(f"{LICHESS}/api/users", data=username.encode()))
+    if not users:
+        raise ValueError(f"Lichess user {username!r} not found")
+    u = users[0]
+    if u.get("disabled"):
+        raise ValueError(f"{username} has closed their account")
+    pf = (u.get("perfs") or {}).get(perf) or {}
+    return u["id"], u["username"], int(pf.get("rating", 0)), int(pf.get("games", 0))
+
+
+def _pgn_rating(text: str, name: str) -> int:
+    ratings = []
+    for g in parse_pgn(text):
+        for side in ("White", "Black"):
+            if g.headers.get(side, "").lower() == name.lower():
+                try:
+                    ratings.append(int(g.headers.get(f"{side}Elo", "")))
+                except ValueError:
+                    pass
+    return int(np.median(ratings)) if ratings else 0
+
+
+def add_player(
+    lichess: str | None = None,
+    chesscom: str | None = None,
+    pgn: str | None = None,
+    player: str | None = None,
+    rating: int | None = None,
+    n_games: int = 75,
+    depth: int = 5,
+    progress=None,
+) -> dict:
+    """Add one player to the cohort: fetch, analyse, fit, and re-run the PCA.
+
+    The population prior is kept fixed so existing profiles do not change;
+    the PCA axes are recomputed with the new player included.
+    """
+    from .ingest import fetch_chesscom
+    from .profile import slugify
+
+    def step(msg, frac=None):
+        print(f"  {msg}", file=sys.stderr)
+        if progress:
+            progress(msg, frac)
+
+    prior = load_population()
+    if lichess:
+        step(f"looking up {lichess} on Lichess", 0.02)
+        pid, username, r, n_blitz = _lichess_rating(lichess)
+        if n_blitz < 20:
+            raise ValueError(f"{username} has only {n_blitz} rated blitz games on Lichess (need 20+)")
+        step(f"downloading {n_games} rated blitz games", 0.05)
+        url = f"{LICHESS}/api/games/user/{pid}?max={n_games}&rated=true&perfType=blitz&clocks=true&evals=false&opening=false"
+        text = _get(url, "application/x-chess-pgn", timeout=300)
+        source = "lichess blitz"
+    elif chesscom:
+        step(f"downloading games of {chesscom} from Chess.com", 0.05)
+        text = fetch_chesscom(chesscom, n_games)
+        username = chesscom
+        pid = "chesscom-" + slugify(chesscom)
+        r = rating or _pgn_rating(text, chesscom)
+        source = "chess.com"
+    elif pgn:
+        if not player:
+            from .ingest import player_names
+
+            player = next(iter(player_names(parse_pgn(pgn))), None)
+        if not player:
+            raise ValueError("could not find a player name in the PGN")
+        text, username, pid = pgn, player, "pgn-" + slugify(player)
+        r = rating or _pgn_rating(pgn, player)
+        source = "pgn upload"
+    else:
+        raise ValueError("give a Lichess username, a Chess.com username, or a PGN")
+    if rating:
+        r = rating
+    if not r:
+        raise ValueError("no rating found - please enter the player's rating (needed to separate style from strength)")
+
+    games = games_of(parse_pgn(text), username)
+    if len(games) < 20:
+        raise ValueError(f"only {len(games)} usable games for {username} (need 20+)")
+    GAMES.mkdir(parents=True, exist_ok=True)
+    (GAMES / f"{pid}.pgn").write_text(text)
+
+    players = json.loads(PLAYERS.read_text()) if PLAYERS.exists() else []
+    players = [p for p in players if p["id"] != pid]
+    entry = {"id": pid, "username": username, "rating": r, "source": source, "added": True}
+    players.append(entry)
+    PLAYERS.write_text(json.dumps(players, indent=1))
+
+    ANALYSIS.mkdir(parents=True, exist_ok=True)
+    for f in ANALYSIS.glob(f"{pid}.*"):
+        f.unlink()  # re-adding a player re-analyses their latest games
+    step(f"analysing {len(games)} games with Stockfish (a few minutes)", 0.1)
+    with _ADD_LOCK:
+        return _finish_add(entry, pid, username, depth, prior, step)
+
+
+def _finish_add(entry, pid, username, depth, prior, step) -> dict:
+    _analyse_player(pid, username, depth, progress=lambda i, n: step(f"analysing game {i}/{n}", 0.1 + 0.8 * i / n))
+    step("fitting the personal model", 0.92)
+    prof = fit_player(entry, prior)
+    step("updating the cognition map", 0.97)
+    out = run_pca()
+    me = next(p for p in out["players"] if p["id"] == prof.id)
+    step("done", 1.0)
+    return {"player_id": prof.id, "name": username, "rating": entry["rating"], "map": me}
 
 
 # ---------------------------------------------------------------------- PCA
@@ -414,7 +544,7 @@ def run_pca(n_components: int = 6) -> dict:
 
     out = {
         "players": [
-            {"id": r["id"], "name": r["name"], "rating": r["rating"], "pc": [round(float(x), 3) for x in scores[i]], "pcA": [round(float(x), 3) for x in sA[i]], "pcB": [round(float(x), 3) for x in sB[i]], "type": int(lab[i])}
+            {"id": r["id"], "name": r["name"], "rating": r["rating"], "added": r.get("added", False), "source": r.get("source", "lichess blitz"), "pc": [round(float(x), 3) for x in scores[i]], "pcA": [round(float(x), 3) for x in sA[i]], "pcB": [round(float(x), 3) for x in sB[i]], "type": int(lab[i])}
             for i, r in enumerate(rows)
         ],
         "components": comps,

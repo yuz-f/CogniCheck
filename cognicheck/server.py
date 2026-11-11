@@ -64,6 +64,8 @@ class BuildRequest(BaseModel):
     lichess: str | None = None
     chesscom: str | None = None
     max_games: int = 150
+    rating: int | None = None
+    include_in_map: bool = True
 
 
 class PredictRequest(BaseModel):
@@ -99,7 +101,9 @@ class PositionRequest(BaseModel):
 # --------------------------------------------------------------- endpoints
 @app.get("/api/health")
 def health():
-    return {"ok": True, "engine": shared_engine() is not None, "players": len(profiles())}
+    from .cohort import POPULATION_REAL
+
+    return {"ok": True, "engine": shared_engine() is not None, "players": len(profiles()), "cohort": POPULATION_REAL.exists()}
 
 
 @app.get("/api/players")
@@ -153,6 +157,24 @@ def player_games(pid: str):
 def _run_build(job_id: str, req: BuildRequest):
     job = _jobs[job_id]
     try:
+        from . import cohort
+
+        if req.include_in_map and cohort.POPULATION_REAL.exists():
+            # Same pipeline as the cohort: profile + cognition vector + PCA update.
+            def progress(msg, frac):
+                job["status"] = msg
+                if frac is not None:
+                    job["progress"] = frac
+
+            res = cohort.add_player(
+                lichess=req.lichess, chesscom=req.chesscom, pgn=req.pgn, player=req.player,
+                rating=req.rating, n_games=min(req.max_games, 75), progress=progress,
+            )
+            with _lock:
+                _profiles.pop(res["player_id"], None)
+            job.update(status="done", progress=1.0, player_id=res["player_id"], map=res["map"])
+            return
+
         from .ingest import fetch_chesscom, fetch_lichess
 
         if req.lichess:
@@ -164,11 +186,11 @@ def _run_build(job_id: str, req: BuildRequest):
         else:
             text, player = req.pgn or "", req.player
 
-        def progress(i, n):
+        def progress2(i, n):
             job["status"] = f"analysing game {i}/{n}"
             job["progress"] = i / n
 
-        prof = build_from_pgn_text(text, player, shared_engine(), req.max_games, progress)
+        prof = build_from_pgn_text(text, player, shared_engine(), req.max_games, progress2)
         job.update(status="done", progress=1.0, player_id=prof.id)
     except Exception as e:  # report to the client
         traceback.print_exc()

@@ -154,6 +154,13 @@ def cmd_cohort(args):
         cohort.print_report(cohort.run_pca())
 
 
+def cmd_add(args):
+    from . import cohort
+
+    res = cohort.add_player(lichess=args.lichess, chesscom=args.chesscom, pgn=Path(args.pgn).read_text() if args.pgn else None, player=args.player, rating=args.rating)
+    print(json.dumps(res, indent=1))
+
+
 def cmd_serve(args):
     import uvicorn
 
@@ -200,6 +207,14 @@ def main(argv=None):
     co.add_argument("--workers", type=int, default=4)
     co.add_argument("--depth", type=int, default=5)
     co.set_defaults(func=cmd_cohort)
+
+    ad = sub.add_parser("add", help="add one player to the cohort: profile + place on the PCA map")
+    ad.add_argument("--lichess")
+    ad.add_argument("--chesscom")
+    ad.add_argument("--pgn", help="PGN file")
+    ad.add_argument("--player", help="name of the player in the PGN")
+    ad.add_argument("--rating", type=int, help="rating, if the PGN has none")
+    ad.set_defaults(func=cmd_add)
 
     s = sub.add_parser("serve", help="run the web app")
     s.add_argument("--host", default="127.0.0.1")

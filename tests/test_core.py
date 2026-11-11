@@ -174,3 +174,11 @@ def test_cohort_helpers():
     v = cohort.cognition_vector(w, w, {"motif_index": {"knight": 2.0}}, {"engine_match": 0.4})
     assert v["blind:knight"] > 0 and v["blind:bishop"] == 0 and v["skill:engine_match"] == 0.4
     assert not any(k.startswith("style:eng_") for k in v)
+
+
+def test_pgn_rating_for_added_players():
+    from cognicheck import cohort
+
+    pgn = SAMPLE_PGN.replace('[White "Alice"]', '[White "Alice"]\n[WhiteElo "1500"]').replace('[Black "Alice"]', '[Black "Alice"]\n[BlackElo "1600"]')
+    assert cohort._pgn_rating(pgn, "alice") in (1500, 1550, 1600)
+    assert cohort._pgn_rating(SAMPLE_PGN, "alice") == 0

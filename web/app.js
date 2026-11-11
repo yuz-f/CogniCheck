@@ -210,18 +210,24 @@ $("#pgn-file").addEventListener("change", async (e) => {
   if (f) $("#pgn-text").value = await f.text();
 });
 $("#build-btn").addEventListener("click", async () => {
-  const body = { lichess: $("#lichess-user").value.trim() || null, chesscom: $("#chesscom-user").value.trim() || null, pgn: $("#pgn-text").value.trim() || null, player: $("#pgn-player").value.trim() || null };
+  const body = {
+    lichess: $("#lichess-user").value.trim() || null, chesscom: $("#chesscom-user").value.trim() || null,
+    pgn: $("#pgn-text").value.trim() || null, player: $("#pgn-player").value.trim() || null,
+    rating: +$("#add-rating").value || null, include_in_map: $("#add-map").checked,
+  };
   const status = $("#build-status");
   try {
     let job = await api("/api/players", body);
     $("#build-btn").disabled = true;
     while (job.status !== "done" && job.status !== "error") {
-      status.textContent = job.status;
+      status.textContent = `${job.status}${job.progress ? ` (${Math.round(job.progress * 100)}%)` : ""}`;
       await new Promise((r) => setTimeout(r, 1000));
       job = await api(`/api/jobs/${job.id}`);
     }
     if (job.status === "error") throw new Error(job.error);
-    status.textContent = "Profile ready.";
+    status.textContent = job.map ? "Profile ready and added to the cognition map (see the Map tab)." : "Profile ready.";
+    map.data = null;  // reload the map with the new player
+    if (job.map) map.sel = job.player_id;
     await loadPlayers(job.player_id);
   } catch (err) {
     status.textContent = `Error: ${err.message}`;
@@ -480,6 +486,8 @@ const map = {
     $("#map-x").onchange = $("#map-y").onchange = () => this.render();
     this.render();
     this.side();
+    const pre = this.sel && this.data.players.find((p) => p.id === this.sel);
+    if (pre) this.pick(pre);
   },
   axisName(c) {
     // Name each end of the axis by its own two strongest loadings. A negative loading on a
@@ -506,9 +514,10 @@ const map = {
       <text x="${sx(0) + 6}" y="${H - pad + 18}">↓ ${esc(ay.neg)}</text>`;
     d.players.forEach((p, i) => {
       const r = 4 + ((p.rating - 800) / 2200) * 5;
+      if (p.added) svg += `<circle cx="${sx(p.pc[xi]).toFixed(1)}" cy="${sy(p.pc[yi]).toFixed(1)}" r="${(Math.max(3, r) + 4).toFixed(1)}" fill="none" stroke="var(--ink)" stroke-width="1.5"/><text x="${(sx(p.pc[xi]) + Math.max(3, r) + 6).toFixed(1)}" y="${(sy(p.pc[yi]) + 4).toFixed(1)}" style="fill:var(--ink);font-weight:600">${esc(p.name)}</text>`;
       svg += `<circle class="dot ${this.sel === p.id ? "sel" : ""}" data-i="${i}" cx="${sx(p.pc[xi]).toFixed(1)}" cy="${sy(p.pc[yi]).toFixed(1)}" r="${Math.max(3, r).toFixed(1)}" fill="${TYPE_COLORS[p.type % TYPE_COLORS.length]}" opacity="0.85"><title>${esc(p.name)} (${p.rating})</title></circle>`;
     });
-    svg += `</svg><p class="muted" style="margin:4px 8px">Each dot is a real Lichess blitz player; dot size = rating, colour = player type. Rating has been regressed out of the axes. Click a dot.</p>`;
+    svg += `</svg><p class="muted" style="margin:4px 8px">Each dot is a real Lichess blitz player; dot size = rating, colour = player type; ringed and named = players you added. Rating has been regressed out of the axes. Click a dot. Add players under <b>Players → Add a player</b>.</p>`;
     $("#map-plot").innerHTML = svg;
     $("#map-plot").querySelectorAll(".dot").forEach((el) => el.addEventListener("click", () => this.pick(d.players[+el.dataset.i])));
     const weak = d.silhouette < 0.25 ? `<p class="no" style="font-weight:400">Weak separation (silhouette ${d.silhouette}): players form a continuum, not distinct types. Read the axes; treat the colours as rough regions only.</p>` : "";

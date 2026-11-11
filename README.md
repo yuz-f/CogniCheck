@@ -98,6 +98,28 @@ profiler *rediscovers* the planted traits from games alone — see the results s
 Regenerate with `python -m cognicheck generate --persona kai --games 120` and rebuild
 with `scripts/build_demo.sh`.
 
+### Adding your own players
+
+Use **Players → Add a player** in the app (Lichess username, Chess.com username or PGN),
+or the command line:
+
+```bash
+python -m cognicheck add --lichess <username>
+python -m cognicheck add --pgn games.pgn --player "Name" --rating 1650
+```
+
+The player gets the same treatment as the cohort:
+- their 75 most recent rated blitz games are analysed (about a minute),
+- a personal model is fitted against the fixed population prior, so existing profiles
+  don't change,
+- the PCA is re-run with them included.
+
+Added players can be predicted right away (Play, Live, Analyse) and appear ringed and
+named on the Map.
+
+For PGN and Chess.com players a rating is needed to remove strength from the axes. A
+Chess.com rating is not on the Lichess scale, so their map position is approximate.
+
 ### Results (120 games per persona, 18 held-out games each, Stockfish depth 6)
 
 **Style is recovered clearly.** The largest personal deviations from the population are
@@ -166,6 +188,28 @@ The study run behind the numbers below:
 
 Real player data stays local: `data/real/` is git-ignored. Only aggregate results are
 reported here.
+
+### Adding your own players
+
+Use **Players → Add a player** in the app (Lichess username, Chess.com username or PGN),
+or the command line:
+
+```bash
+python -m cognicheck add --lichess <username>
+python -m cognicheck add --pgn games.pgn --player "Name" --rating 1650
+```
+
+The player gets the same treatment as the cohort:
+- their 75 most recent rated blitz games are analysed (about a minute),
+- a personal model is fitted against the fixed population prior, so existing profiles
+  don't change,
+- the PCA is re-run with them included.
+
+Added players can be predicted right away (Play, Live, Analyse) and appear ringed and
+named on the Map.
+
+For PGN and Chess.com players a rating is needed to remove strength from the axes. A
+Chess.com rating is not on the Lichess scale, so their map position is approximate.
 
 ### Results
 
