@@ -19,6 +19,9 @@ def client(tmp_path, monkeypatch):
     prof.save(tmp_path)
     monkeypatch.setattr(server, "PROFILES", tmp_path)
     monkeypatch.setattr(cli, "PROFILES", tmp_path)
+    from cognicheck import cohort
+
+    monkeypatch.setattr(cohort, "PROFILES_REAL", tmp_path / "real")
     server._profiles.clear()
     return TestClient(server.app)
 
