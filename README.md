@@ -98,7 +98,50 @@ profiler *rediscovers* the planted traits from games alone — see the results s
 Regenerate with `python -m cognicheck generate --persona kai --games 120` and rebuild
 with `scripts/build_demo.sh`.
 
-RESULTS_PLACEHOLDER
+### Results (120 games per persona, 18 held-out games each, Stockfish depth 6)
+
+**Style is recovered clearly.** The largest personal deviations from the population are
+exactly the planted tastes:
+
+| Persona | Top recovered style traits |
+|---|---|
+| Kai | knight moves ×1.56, reacts to last move ×1.44, checks ×1.26 |
+| Sasha | pawn storm ×2.18, king approach ×2.08, backward moves ×0.56, forward ×1.56 |
+| Tomas | castles ×2.06, even trades ×1.69, early queen ×0.66, development ×1.45 |
+
+**Blind spots are recovered, but not cleanly for every persona:**
+
+* Sasha (blind to backward moves): *backward* is the #1 combined motif (×1.42); "walks
+  into backward moves" ×1.79 is the top row. ✔
+* Tomas (blind to long diagonals): "overlooks threats from long diagonals" ×1.56 and
+  "from bishop moves" ×1.51 are the top *threat* rows. ✔ But the combined ranking puts
+  "misses quiet wins" and "misses mates" above them — noise from the opportunity view.
+* Kai (blind to knight moves): "overlooks threats from knight moves" ×1.33 and
+  "walks into knight moves" ×1.24 show up, and forks are ×3.5 over-represented among
+  the moves punishing his blunders; but *backward* ranks above *knight* in the combined
+  score. Partial ✔.
+
+**Move prediction (top-1 on held-out games):**
+
+| | Kai | Sasha | Tomas |
+|---|---|---|---|
+| personal model + book | 28.6% | **35.0%** | 32.7% |
+| average-player model | 28.0% | 30.8% | 32.3% |
+| Stockfish top move | 27.0% | 28.7% | 29.2% |
+| random legal move | 4.4% | 5.0% | 4.0% |
+
+The personal model beats the engine for all three, but beats the population model by a
+meaningful margin only for Sasha, whose style is strongest. For Kai and Tomas the gap
+(+0.4–0.6 pts on ~900 positions) is within noise. The personas pick moves mostly by
+noisy engine evaluation, which caps how predictable they are. Real humans are much
+more habitual (repertoires, recurring plans), so the opening book and style terms
+should matter more on real games — this still needs to be checked on real Lichess
+data.
+
+**Known weakness:** the predictive model only knows blind spots indirectly (through
+"ignores threat" / "hangs material"). Adding motif-specific features (e.g. "leaves a
+knight capture available") would let it learn the blind spot directly and should
+improve prediction for players like Kai.
 
 ## API
 

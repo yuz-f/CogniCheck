@@ -159,7 +159,9 @@ async function selectPlayer(id) {
   ].filter(([, v]) => v);
   const bs = p.blind_spots || {};
   const rows = (bs.rows || []).filter((r) => r.index >= 1.15).slice(0, 8);
-  const strengths = (bs.rows || []).filter((r) => r.index <= 0.8).slice(-4);
+  const seen = new Set();
+  const strengths = (bs.rows || []).filter((r) => r.index <= 0.8).reverse()
+    .filter((r) => !seen.has(r.motif) && seen.add(r.motif)).slice(0, 4);
   const style = (p.style || []).filter((s) => Math.abs(s.delta) >= 0.15).slice(0, 10);
   const st = p.stats || {};
   $("#profile").innerHTML = `
