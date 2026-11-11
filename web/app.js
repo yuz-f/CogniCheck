@@ -482,9 +482,11 @@ const map = {
     this.side();
   },
   axisName(c) {
-    const l = c.loadings.slice(0, 3);
-    const pos = l.filter((x) => x.loading > 0).map((x) => x.label), neg = l.filter((x) => x.loading < 0).map((x) => x.label);
-    return { pos: pos.join(", ") || "-", neg: neg.join(", ") || "-" };
+    // Name each end of the axis by its own two strongest loadings. A negative loading on a
+    // "bad" trait reads as its opposite at the positive end, so show it as "less …".
+    const pos = [...c.loadings.filter((x) => x.loading > 0).map((x) => x.label), ...c.loadings.filter((x) => x.loading < 0).map((x) => `less ${x.label}`)];
+    const neg = [...c.loadings.filter((x) => x.loading < 0).map((x) => x.label), ...c.loadings.filter((x) => x.loading > 0).map((x) => `less ${x.label}`)];
+    return { pos: pos.slice(0, 2).join(", "), neg: neg.slice(0, 2).join(", ") };
   },
   render() {
     const d = this.data; if (!d) return;
@@ -509,7 +511,8 @@ const map = {
     svg += `</svg><p class="muted" style="margin:4px 8px">Each dot is a real Lichess blitz player; dot size = rating, colour = player type. Rating has been regressed out of the axes. Click a dot.</p>`;
     $("#map-plot").innerHTML = svg;
     $("#map-plot").querySelectorAll(".dot").forEach((el) => el.addEventListener("click", () => this.pick(d.players[+el.dataset.i])));
-    $("#map-types").innerHTML = `<div class="card"><h3>Player types (k-means, k=${d.k}, silhouette ${d.silhouette})</h3>${d.types.map((t) => `<div style="margin:6px 0"><span class="swatch" style="background:${TYPE_COLORS[t.type % TYPE_COLORS.length]}"></span><b>Type ${t.type + 1}</b> · ${t.size} players · mean rating ${t.mean_rating}<div class="why">${t.traits.slice(0, 4).map((x) => `${x.z > 0 ? "more" : "less"} ${esc(x.label)} (${x.z > 0 ? "+" : ""}${x.z})`).join(" · ")}</div></div>`).join("")}</div>`;
+    const weak = d.silhouette < 0.25 ? `<p class="no" style="font-weight:400">Weak separation (silhouette ${d.silhouette}): players form a continuum, not distinct types. Read the axes; treat the colours as rough regions only.</p>` : "";
+    $("#map-types").innerHTML = `<div class="card"><h3>Player types (k-means, k=${d.k}, silhouette ${d.silhouette})</h3>${weak}${d.types.map((t) => `<div style="margin:6px 0"><span class="swatch" style="background:${TYPE_COLORS[t.type % TYPE_COLORS.length]}"></span><b>Type ${t.type + 1}</b> · ${t.size} players · mean rating ${t.mean_rating}<div class="why">${t.traits.slice(0, 4).map((x) => `${x.z > 0 ? "more" : "less"} ${esc(x.label)} (${x.z > 0 ? "+" : ""}${x.z})`).join(" · ")}</div></div>`).join("")}</div>`;
   },
   side() {
     const d = this.data;

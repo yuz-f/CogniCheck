@@ -143,6 +143,71 @@ data.
 knight capture available") would let it learn the blind spot directly and should
 improve prediction for players like Kai.
 
+## Cognition map of real players (PCA)
+
+`python -m cognicheck cohort all` profiles a cohort of real Lichess players and maps
+them. Its stages are `select`, `fetch`, `analyse`, `fit` and `pca`, and each can be run alone.
+
+The study run behind the numbers below:
+- **Cohort:** 81 Lichess blitz players rated 812–2929. 72 were sampled evenly across
+  rating bands from recent arenas, plus 9 from the blitz leaderboard. Each had 400+ rated
+  blitz games on Lichess.
+- **Games:** 75 recent rated blitz games per player, about 48,600 decisions in total,
+  analysed with Stockfish at depth 5.
+- **Prior:** the population prior is trained on the pooled real games, with an equal
+  number of positions from every player.
+- **Cognition vector:** 48 numbers per player: 30 style deviations from the population,
+  15 blind-spot indices (log) and 3 accuracy stats.
+- **Rating removed:** rating is regressed out of the vector before PCA. Without this,
+  the first axis is just strength: raw engine match correlates r = 0.92 with rating.
+- **Validity check:** each player is profiled twice more, from two disjoint halves of
+  their games (odd/even). An axis is a real trait only if both halves put the player in
+  the same place. With shuffled players, |r| stays below 0.22 (95%).
+
+Real player data stays local: `data/real/` is git-ignored. Only aggregate results are
+reported here.
+
+### Results
+
+| Axis | Variance | Split-half r | Reading (after removing rating) |
+|---|---|---|---|
+| PC1 | 9.0% | **0.80** | *Careful vs. loose*: fewer blunders and less loss than their rating predicts, castles, central play; vs. king walks and early queen sorties |
+| PC2 | 8.5% | **0.72** | *Classical developer vs. attacker*: develops minor pieces; vs. marching on the enemy king, pawn storms, knight and queen raids, long moves |
+| PC3 | 7.2% | **0.67** | *Long-range vision*: castles, plays into the opponent's half; vs. blind to long diagonals, long-range and bishop moves, and pushes forward |
+| PC4 | 5.8% | 0.40 | weak; mixed blind-spot terms |
+| PC5 | 5.4% | **0.67** | *Trader / materialist*: even trades, wins material, central; vs. rook manoeuvres |
+| PC6 | 4.8% | 0.58 | *Alert developer*: develops, punishes material, rarely ignores threats |
+
+**What this says**
+
+- **The axes are real.** Five of the six axes reproduce across independent halves of a
+  player's games (r = 0.58–0.80, against a null of about 0.2). They are stable traits of
+  how a player thinks, not noise, and they hold after removing playing strength.
+- **Cognition is many-dimensional.** Each axis explains only 5–9% of the variance. No
+  single "style" number captures a player, which is why the profile keeps the full vector.
+- **There are no discrete player types.** k-means separation is weak (silhouette
+  0.11–0.14 for k = 2–6). Players form a continuum, and the map should be read through
+  its axes, not as boxes like "the attacker" or "the defender". The best split even
+  isolates a single outlier as its own "type".
+- **Blind spots partly track strength.** Before rating is removed, blindness to forks,
+  long diagonals and long-range moves correlates r ≈ −0.55 with rating: stronger players
+  see further.
+
+**Prediction on held-out games (mean over 81 players, top-1)**
+
+| Model | Top-1 |
+|---|---|
+| Personal model | **38.7%** |
+| Average-player model | 38.0% |
+| Stockfish top move | 34.5% |
+| Random legal move | 5.3% |
+
+The personal model assigns higher probability to the moves actually played (better
+log-loss) for **74 of 81** players, so it captures the player better. Its top-1 hit rate
+is higher for 47 of 81 players, but only +0.7 points on average: the first-choice move
+is mostly predictable from the position, and personal traits shift the probabilities
+of the alternatives.
+
 ## Live games
 
 The **Live** tab follows a game while it is being played on Lichess (game link, game
