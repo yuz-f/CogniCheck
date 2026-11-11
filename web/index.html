@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CogniCheck</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">Cogni<span>Check</span></div>
+    <nav>
+      <button data-view="players" class="active">Players</button>
+      <button data-view="play">Play</button>
+      <button data-view="analyse">Analyse</button>
+    </nav>
+    <div id="engine-badge" class="badge"></div>
+  </header>
+
+  <main>
+    <!-- PLAYERS ---------------------------------------------------------->
+    <section id="view-players" class="view active">
+      <div class="grid-2">
+        <div>
+          <h2>Players</h2>
+          <p class="muted">Each player gets a personal model trained only on their own games. Pick one to see how they think.</p>
+          <ul id="player-list" class="player-list"></ul>
+          <details class="card">
+            <summary>Add a player</summary>
+            <div class="form">
+              <label>Lichess username <input id="lichess-user" placeholder="e.g. your_handle"></label>
+              <label>or Chess.com username <input id="chesscom-user"></label>
+              <label>or paste PGN <textarea id="pgn-text" rows="5" placeholder="[Event ...]"></textarea></label>
+              <label>Player name in the PGN (optional) <input id="pgn-player"></label>
+              <label>PGN file <input id="pgn-file" type="file" accept=".pgn,text/plain"></label>
+              <button id="build-btn" class="primary">Build profile</button>
+              <div id="build-status" class="muted"></div>
+            </div>
+          </details>
+        </div>
+        <div id="profile" class="profile"><p class="muted">Select a player.</p></div>
+      </div>
+    </section>
+
+    <!-- PLAY ------------------------------------------------------------->
+    <section id="view-play" class="view">
+      <div class="play-layout">
+        <div class="board-col">
+          <div class="scorebar">
+            <div><span class="label">You</span> <b id="score-user">0</b> <small id="hits-user"></small></div>
+            <div id="game-title" class="muted"></div>
+            <div><span class="label">Model</span> <b id="score-model">0</b> <small id="hits-model"></small></div>
+          </div>
+          <div id="play-board" class="board"></div>
+          <div class="controls">
+            <button id="submit-guess" class="primary" disabled>Lock in guess</button>
+            <button id="hint-btn">Hint (−2)</button>
+            <button id="skip-btn">Skip</button>
+            <button id="new-game-btn">New game</button>
+          </div>
+          <p id="guess-label" class="muted center"></p>
+          <div id="history" class="history"></div>
+        </div>
+        <div class="side-col">
+          <div class="card" id="play-intro">
+            <h3>Predict the player, not the best move</h3>
+            <p>You are watching a real game of <b id="intro-player">…</b> that the model has never seen. On each of their turns, click the move <em>you think they actually played</em>. The model guesses too. After each reveal you see how the model reads the position through the player's eyes: what they notice, what they overlook, where their attention is.</p>
+            <label>Player <select id="play-player"></select></label>
+            <label>Game <select id="play-game"></select></label>
+            <button id="start-btn" class="primary">Start</button>
+          </div>
+          <div id="reveal" class="card hidden"></div>
+          <div id="hint" class="card hidden"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ANALYSE ---------------------------------------------------------->
+    <section id="view-analyse" class="view">
+      <div class="play-layout">
+        <div class="board-col">
+          <div id="an-board" class="board"></div>
+          <div class="controls">
+            <button id="an-undo">Undo</button>
+            <button id="an-flip">Flip</button>
+            <button id="an-reset">Reset</button>
+            <label class="toggle"><input type="checkbox" id="an-heat" checked> attention</label>
+          </div>
+          <label class="fen">FEN <input id="an-fen"><button id="an-load">Load</button></label>
+          <div id="an-history" class="history"></div>
+        </div>
+        <div class="side-col">
+          <div class="card">
+            <label>Whose eyes? <select id="an-player"></select></label>
+            <p class="muted">Make moves for either side. The panel shows what <b>this</b> player would most likely play if it were their turn, and how they probably perceive the position.</p>
+          </div>
+          <div id="an-out" class="card"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
