@@ -114,6 +114,7 @@ function showView(name) {
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${name}`));
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   if (name === "analyse") analyse.refresh();
+  if (name === "live") live.loadSimGames();
 }
 document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
 
@@ -127,6 +128,7 @@ async function loadPlayers(selectId) {
   const opts = players.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
   $("#play-player").innerHTML = opts;
   $("#an-player").innerHTML = opts;
+  $("#lv-player").innerHTML = `<option value="">match by player name</option>` + opts;
   const id = selectId || currentPlayer || (players[0] && players[0].id);
   if (id) selectPlayer(id);
 }
@@ -374,10 +376,101 @@ const analyse = {
   },
 };
 
+// -------------------------------------------------------------------- live
+const live = {
+  board: null, es: null, snap: null, guess: null,
+  init() {
+    this.board = new Board($("#lv-board"), (u) => this.pick(u));
+    this.board.set({ fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", interactive: false });
+    $("#lv-start").addEventListener("click", () => this.start({ source: $("#lv-source").value.trim(), player_id: $("#lv-player").value || null, color: $("#lv-color").value || null }));
+    $("#lv-sim").addEventListener("click", () => {
+      const pid = $("#lv-player").value;
+      if (!pid) { alert("Pick a profile to simulate."); return; }
+      this.start({ player_id: pid, simulate_game: +$("#lv-sim-game").value, delay: +$("#lv-delay").value || 4 });
+    });
+    $("#lv-player").addEventListener("change", () => this.loadSimGames());
+    $("#lv-lock").addEventListener("click", () => this.lock());
+    $("#lv-show").addEventListener("change", () => this.render());
+  },
+  async loadSimGames() {
+    const pid = $("#lv-player").value;
+    if (!pid) { $("#lv-sim-game").innerHTML = ""; return; }
+    const games = await api(`/api/players/${pid}/games`);
+    $("#lv-sim-game").innerHTML = games.map((g) => `<option value="${g.index}">${esc(g.white)} – ${esc(g.black)} (${esc(g.result)})</option>`).join("");
+  },
+  async start(body) {
+    try {
+      if (this.es) this.es.close();
+      const r = await api("/api/live", body);
+      this.guess = null;
+      this.es = new EventSource(`/api/live/${r.id}/events`);
+      this.es.onmessage = (e) => { this.snap = JSON.parse(e.data); this.render(); if (["finished", "error"].includes(this.snap.status)) this.es.close(); };
+      this.es.onerror = () => { $("#lv-status").textContent = "Connection lost."; };
+      $("#lv-status").textContent = "Connecting…";
+    } catch (e) { alert(e.message); }
+  },
+  pick(uci) {
+    this.guess = uci;
+    $("#lv-lock").disabled = false;
+    this.board.set({ arrows: [{ uci, color: COLORS.guess, width: 2.4 }] });
+  },
+  async lock() {
+    if (!this.snap || !this.guess) return;
+    try { await api(`/api/live/${this.snap.id}/guess`, { uci: this.guess }); }
+    catch (e) { $("#lv-status").textContent = e.message; }
+    $("#lv-lock").disabled = true;
+  },
+  render() {
+    const s = this.snap;
+    if (!s) return;
+    const pend = s.pending;
+    if (!pend || pend.guess) this.guess = pend && pend.guess;
+    const show = $("#lv-show").checked || s.status === "finished";
+    const arrows = [];
+    if (pend && pend.guess) arrows.push({ uci: pend.guess, color: COLORS.guess, width: 2.4 });
+    else if (this.guess && pend) arrows.push({ uci: this.guess, color: COLORS.guess, width: 2.4, opacity: 0.6 });
+    if (pend && show) pend.prediction.moves.slice(0, 3).forEach((m, i) => arrows.push({ uci: m.uci, color: COLORS.model, width: 2.4 - i * 0.6, opacity: 0.85 - i * 0.2 }));
+    if (!pend && s.last && s.last.actual) arrows.push({ uci: s.last.actual, color: COLORS.actual, width: 2.4 });
+    this.board.set({ fen: s.fen, orientation: s.player_color || "white", legal: pend && !pend.guess ? s.legal : [], last: s.last_move, interactive: !!pend && !pend.guess, arrows, heat: pend && show ? pend.prediction.perspective.attention : null });
+    $("#lv-title").textContent = `${s.white} – ${s.black}`;
+    const sc = s.score;
+    $("#lv-user").textContent = sc.user_hits; $("#lv-user-n").textContent = `/${sc.user_guesses}`;
+    $("#lv-model").textContent = sc.model_hits; $("#lv-model-n").textContent = `/${sc.predicted} · top3 ${sc.model_top3}`;
+    $("#lv-history").innerHTML = s.history.map((m, i) => (i % 2 === 0 ? `<b>${i / 2 + 1}.</b> ` : "") + esc(m)).join(" ");
+    const fmt = (ms) => ms == null ? "–" : `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+    $("#lv-clock").textContent = s.clock ? `⏱ White ${fmt(s.clock.white)} · Black ${fmt(s.clock.black)}` : "";
+    let status;
+    if (s.status === "error") status = `Error: ${s.error}`;
+    else if (s.status === "finished") status = `Game over ${s.result || ""}. Model predicted ${sc.model_hits}/${sc.predicted} moves exactly (${sc.model_top3} in its top 3); you got ${sc.user_hits}/${sc.user_guesses}.`;
+    else if (pend) status = pend.guess ? `Guess locked: ${pend.guess}. Waiting for ${s.player}…` : `${s.player} is thinking. Click your guess on the board.`;
+    else status = s.status === "live" ? "Opponent to move…" : s.status;
+    $("#lv-status").textContent = status;
+    $("#lv-setup").classList.toggle("hidden", s.status === "live");
+    const predEl = $("#lv-pred");
+    if (pend && show) {
+      predEl.classList.remove("hidden");
+      predEl.innerHTML = `<h3>Prediction for ${esc(s.player)} <small>registered ${new Date(pend.made_at * 1000).toLocaleTimeString()}</small></h3>${movesList(pend.prediction, null)}${perspectiveHtml(pend.prediction.perspective, pend.prediction, null)}`;
+    } else if (pend) {
+      predEl.classList.remove("hidden");
+      predEl.innerHTML = `<p class="muted">The model has made its prediction (hidden). Tick “show model's prediction” to see it, or guess first.</p>`;
+    } else predEl.classList.add("hidden");
+    const lastEl = $("#lv-last");
+    if (s.last && s.last.actual) {
+      const l = s.last;
+      lastEl.classList.remove("hidden");
+      lastEl.innerHTML = `<div class="verdict">${esc(s.player)} played <b>${esc(l.actual_san)}</b></div>
+        <div>Model: ${esc(l.model_top)} <span class="${l.model_hit ? "ok" : "no"}">${l.model_hit ? "✓" : "✗"}</span> <small>(gave the real move ${pct(l.p_actual)})</small></div>
+        <div>You: ${l.guess ? `${esc(l.guess)} <span class="${l.user_hit ? "ok" : "no"}">${l.user_hit ? "✓" : "✗"}</span>` : `<span class="muted">no guess</span>`}</div>
+        ${!pend && l.perspective ? `<ul class="notes">${l.perspective.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`;
+    } else lastEl.classList.add("hidden");
+  },
+};
+
 // -------------------------------------------------------------------- boot
 (async function boot() {
   play.init();
   analyse.init();
+  live.init();
   try {
     const h = await api("/api/health");
     $("#engine-badge").textContent = h.engine ? "Stockfish: on" : "Stockfish: off (heuristics only)";

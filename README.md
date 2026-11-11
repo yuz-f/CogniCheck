@@ -143,6 +143,36 @@ data.
 knight capture available") would let it learn the blind spot directly and should
 improve prediction for players like Kai.
 
+## Live games
+
+The **Live** tab follows a game while it is being played on Lichess (game link, game
+ID, or a username, which follows their current game). It uses Lichess's public game
+stream, so no login is needed. As soon as it is the profiled player's turn, the model
+makes and timestamps its prediction *before* the move arrives. You lock in your own
+guess, then the real move comes in and both are scored, with clocks shown. The
+profile is matched by player name, or you pick one and say which colour it plays.
+
+Chess.com has no public live move feed, so live mode is Lichess-only (Lichess
+Broadcasts also cover over-the-board events).
+
+**Simulate live** replays a held-out game with the same event format and a delay
+per move, for demos and offline testing.
+
+Data gathering, in two layers:
+
+1. **History → profile:** Lichess export / Chess.com archives, with clocks. Planned:
+   incremental fetches (`since=` last game), profiles per time control, and a cache of
+   engine evaluations per position.
+2. **Live → prediction:** Lichess stream (`/api/stream/game/{id}`), pushed to the
+   browser as Server-Sent Events. Every prediction is logged with timestamp, actual
+   move, guess and clock (`GET /api/live/{id}/log`). Planned: feed finished live games
+   back into the player's profile, and use clock time as a feature (blind spots under
+   time pressure).
+
+> The Lichess stream parser was written against Lichess's documented format and is
+> unit-tested with sample lines, but it has not yet run against the real Lichess
+> server: Lichess was not reachable from the build environment.
+
 ## API
 
 | Method | Path | |
@@ -155,6 +185,10 @@ improve prediction for players like Kai.
 | POST | `/api/game` | start a prediction game on a held-out game |
 | POST | `/api/game/{sid}/guess` | `{uci}` → reveal, model reading, next position |
 | POST | `/api/game/{sid}/hint` | perspective without the answer (−2 points) |
+| POST | `/api/live` | `{source}` (Lichess link/id/username) or `{player_id, simulate_game, delay}` |
+| GET | `/api/live/{id}/events` | Server-Sent Events: a snapshot per update |
+| POST | `/api/live/{id}/guess` | `{uci}` lock in a guess before the move arrives |
+| GET | `/api/live/{id}/log` | every prediction with timestamps, actual move, guess |
 
 ## Tests
 

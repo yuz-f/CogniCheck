@@ -83,10 +83,13 @@ class Predictor:
             if abs(total[j]) < 0.15:
                 continue
             f = FEATURE_NAMES[j]
+            label = FEATURE_LABEL[f]
+            if f == "eng_loss":
+                label = "objectively sound (engine)" if total[j] > 0 else "objectively weak (engine)"
             out.append(
                 {
                     "feature": f,
-                    "label": FEATURE_LABEL[f],
+                    "label": label,
                     "effect": round(float(total[j]), 2),
                     "personal": round(float(personal[j]), 2),
                 }

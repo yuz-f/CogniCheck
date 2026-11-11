@@ -10,13 +10,14 @@ from pathlib import Path
 import chess
 import chess.pgn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .cli import PROFILES, ROOT, build_from_pgn_text
 from .engine import shared_engine
 from .game import SessionStore
+from .live import LiveSession, lichess_events, simulated_events
 from .predictor import Predictor
 from .profile import Profile
 
@@ -78,6 +79,14 @@ class GameRequest(BaseModel):
 
 class GuessRequest(BaseModel):
     uci: str | None = None
+
+
+class LiveRequest(BaseModel):
+    source: str | None = None  # Lichess game URL / id / username
+    player_id: str | None = None  # whose profile to use (default: match by name)
+    color: str | None = None  # "white"/"black" if the profile name is not in the game
+    simulate_game: int | None = None  # replay a held-out game of player_id instead
+    delay: float = 4.0
 
 
 class PositionRequest(BaseModel):
@@ -255,6 +264,103 @@ def game_hint(sid: str):
     with s.lock:
         s.user_score -= 2
         return {"hint": s.hint(), "state": s.state()}
+
+
+# -------------------------------------------------------------------- live
+_live: dict[str, LiveSession] = {}
+
+
+def _live_matcher(player_id: str | None, color: str | None):
+    def match(white: str, black: str):
+        profs = profiles()
+        if player_id:
+            prof = profs.get(player_id)
+            if prof is None:
+                return None, None
+            names = {white.lower(): chess.WHITE, black.lower(): chess.BLACK}
+            if prof.name.lower() in names:
+                c = names[prof.name.lower()]
+            elif color in ("white", "black"):
+                c = chess.WHITE if color == "white" else chess.BLACK
+            else:
+                return None, None
+            return Predictor(prof, shared_engine()), c
+        for c, name in ((chess.WHITE, white), (chess.BLACK, black)):
+            for prof in profs.values():
+                if prof.name.lower() == name.lower():
+                    return Predictor(prof, shared_engine()), c
+        return None, None
+
+    return match
+
+
+@app.post("/api/live")
+def live_start(req: LiveRequest):
+    if req.simulate_game is not None:
+        prof = get_profile(req.player_id or "")
+        if not 0 <= req.simulate_game < len(prof.heldout):
+            raise HTTPException(400, "bad game index")
+        src = simulated_events(prof.heldout[req.simulate_game], delay=max(0.5, req.delay))
+    elif req.source:
+        src = lichess_events(req.source)
+    else:
+        raise HTTPException(400, "give a Lichess game/username or simulate_game")
+    sid = secrets.token_urlsafe(8)
+    sess = LiveSession(sid, src, _live_matcher(req.player_id, req.color))
+    if len(_live) > 100:
+        _live.pop(min(_live, key=lambda k: _live[k].created))
+    _live[sid] = sess.start()
+    return {"id": sid}
+
+
+def _live_session(sid: str) -> LiveSession:
+    if sid not in _live:
+        raise HTTPException(404, "unknown live session")
+    return _live[sid]
+
+
+@app.get("/api/live/{sid}")
+def live_state(sid: str):
+    return _live_session(sid).snapshot()
+
+
+@app.get("/api/live/{sid}/log")
+def live_log(sid: str):
+    return _live_session(sid).log()
+
+
+@app.post("/api/live/{sid}/guess")
+def live_guess(sid: str, req: GuessRequest):
+    try:
+        return _live_session(sid).guess(req.uci or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/live/{sid}/events")
+def live_events(sid: str):
+    """Server-Sent Events: one JSON snapshot per update."""
+    import json
+    import queue as _q
+
+    sess = _live_session(sid)
+    q = sess.subscribe()
+
+    def gen():
+        try:
+            while True:
+                try:
+                    snap = q.get(timeout=15)
+                except _q.Empty:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield f"data: {json.dumps(snap)}\n\n"
+                if snap["status"] in ("finished", "error"):
+                    return
+        finally:
+            sess.unsubscribe(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 if WEB.exists():

@@ -12,6 +12,7 @@
     <nav>
       <button data-view="players" class="active">Players</button>
       <button data-view="play">Play</button>
+      <button data-view="live">Live</button>
       <button data-view="analyse">Analyse</button>
     </nav>
     <div id="engine-badge" class="badge"></div>
@@ -71,6 +72,45 @@
           </div>
           <div id="reveal" class="card hidden"></div>
           <div id="hint" class="card hidden"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LIVE --------------------------------------------------------------->
+    <section id="view-live" class="view">
+      <div class="play-layout">
+        <div class="board-col">
+          <div class="scorebar">
+            <div><span class="label">You</span> <b id="lv-user">0</b> <small id="lv-user-n"></small></div>
+            <div id="lv-title" class="muted"></div>
+            <div><span class="label">Model</span> <b id="lv-model">0</b> <small id="lv-model-n"></small></div>
+          </div>
+          <div id="lv-board" class="board"></div>
+          <div class="controls">
+            <button id="lv-lock" class="primary" disabled>Lock in guess</button>
+            <label class="toggle"><input type="checkbox" id="lv-show"> show model's prediction before the move</label>
+          </div>
+          <p id="lv-status" class="muted center"></p>
+          <div id="lv-clock" class="muted center"></div>
+          <div id="lv-history" class="history"></div>
+        </div>
+        <div class="side-col">
+          <div class="card" id="lv-setup">
+            <h3>Follow a game live</h3>
+            <p class="muted">The model predicts the profiled player's move the moment it is their turn, before the move is played. Lock in your own guess before the move arrives.</p>
+            <label>Lichess game link, game ID, or username (follows their current game)
+              <input id="lv-source" placeholder="https://lichess.org/abcd1234 or a username"></label>
+            <label>Profile to use <select id="lv-player"><option value="">match by player name</option></select></label>
+            <label>If that profile isn't a player in this game, it plays <select id="lv-color"><option value="">-</option><option>white</option><option>black</option></select></label>
+            <button id="lv-start" class="primary">Follow live</button>
+            <h4>No live game handy?</h4>
+            <label>Simulate: replay a held-out game of the selected profile as if it were live
+              <select id="lv-sim-game"></select></label>
+            <label>Seconds per move <input id="lv-delay" type="number" value="4" min="1" max="60"></label>
+            <button id="lv-sim">Simulate live</button>
+          </div>
+          <div id="lv-pred" class="card hidden"></div>
+          <div id="lv-last" class="card hidden"></div>
         </div>
       </div>
     </section>
