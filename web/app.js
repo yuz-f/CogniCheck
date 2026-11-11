@@ -80,7 +80,7 @@ class Board {
       if (this.sel === sq) cls.push("sel");
       if (targets.has(sq)) cls.push("target");
       const p = pos[sq];
-      const h = heat && heat[sq] ? `<span class="heat" style="background: rgba(var(--heat), ${(0.15 + 0.55 * heat[sq]).toFixed(2)})"></span>` : "";
+      const h = heat && heat[sq] ? `<span class="heat" style="background: rgba(0, 0, 255, ${(0.08 + 0.42 * heat[sq]).toFixed(2)})"></span>` : "";
       const piece = p ? `<span class="pc ${p === p.toUpperCase() ? "w" : "b"}">${GLYPH[p.toLowerCase()]}</span>` : "";
       const coordF = i >= 56 ? `<span class="coord f">${sq[0]}</span>` : "";
       const coordR = i % 8 === 0 ? `<span class="coord r">${sq[1]}</span>` : "";
@@ -88,23 +88,30 @@ class Board {
     });
     let svg = "";
     if (arrows && arrows.length) {
-      svg = `<svg class="arrows" viewBox="0 0 100 100"><defs>`;
-      arrows.forEach((a, i) => { svg += `<marker id="ah${i}" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto"><path d="M0,0 L4,2 L0,4 z" fill="${a.color}"/></marker>`; });
-      svg += `</defs>`;
-      arrows.forEach((a, i) => {
-        const [x1, y1] = this.center(a.uci.slice(0, 2));
-        const [x2, y2] = this.center(a.uci.slice(2, 4));
-        const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy) || 1;
-        const ex = x2 - (dx / L) * 3.5, ey = y2 - (dy / L) * 3.5;
-        svg += `<line x1="${x1}" y1="${y1}" x2="${ex}" y2="${ey}" stroke="${a.color}" stroke-width="${a.width || 2}" stroke-linecap="round" opacity="${a.opacity || 0.85}" marker-end="url(#ah${i})"/>`;
-      });
+      svg = `<svg class="arrows" viewBox="0 0 100 100">`;
+      arrows.forEach((a) => { svg += arrowSvg(this.center(a.uci.slice(0, 2)), this.center(a.uci.slice(2, 4)), a.kind || "model", a.width || 2, a.opacity || 0.9); });
       svg += `</svg>`;
     }
     this.el.innerHTML = html + svg;
   }
 }
 
-const COLORS = { actual: "#f2f2f2", model: "#ff1f1f", guess: "#a66bff", threat: "#ff1f1f" };
+// Two colours only, so the three arrows differ by line style:
+//   played = solid blue, model = dashed blue, you = white with a blue outline.
+const BLUE = "#0000ff", WHITE = "#ffffff";
+function arrowSvg([x1, y1], [x2, y2], kind, w, op) {
+  const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
+  const head = 2.6 + w, ex = x2 - ux * 2.2, ey = y2 - uy * 2.2, bx = ex - ux * head, by = ey - uy * head;
+  const px = -uy * head * 0.55, py = ux * head * 0.55;
+  const tri = `${ex},${ey} ${bx + px},${by + py} ${bx - px},${by - py}`;
+  const line = (stroke, width, extra = "") => `<line x1="${x1}" y1="${y1}" x2="${bx}" y2="${by}" stroke="${stroke}" stroke-width="${width}" stroke-linecap="butt" ${extra}/>`;
+  if (kind === "guess") return `<g opacity="${op}">${line(BLUE, w + 1.2)}${line(WHITE, w - 0.2)}<polygon points="${tri}" fill="${WHITE}" stroke="${BLUE}" stroke-width="0.6"/></g>`;
+  if (kind === "model") return `<g opacity="${op}">${line(BLUE, w, `stroke-dasharray="${w * 1.1} ${w * 0.8}"`)}<polygon points="${tri}" fill="${BLUE}"/></g>`;
+  return `<g opacity="${op}">${line(BLUE, w)}<polygon points="${tri}" fill="${BLUE}"/></g>`;
+}
+function legendSvg(kind) {
+  return `<svg width="34" height="12" viewBox="0 0 34 12" aria-hidden="true">${arrowSvg([1, 6], [33, 6], kind, 2.6, 1)}</svg>`;
+}
 
 // -------------------------------------------------------------------- views
 let players = [];
@@ -120,11 +127,13 @@ function showView(name) {
 }
 document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
 
+const KIND = { real: "real · Lichess blitz", synthetic: "synthetic test bot", uploaded: "uploaded", added: "added by you" };
+
 async function loadPlayers(selectId) {
   players = await api("/api/players");
   const list = $("#player-list");
   list.innerHTML = players.length
-    ? players.map((p) => `<li data-id="${esc(p.id)}"><div class="name">${esc(p.name)}</div><small>${p.games} games · model hits ${pct(p.top1)} of held-out moves</small></li>`).join("")
+    ? players.map((p) => `<li data-id="${esc(p.id)}"><div class="name">${esc(p.name)}</div><small>${KIND[p.kind] || ""}${p.rating ? ` · ${p.rating}` : ""} · ${p.games} games · hits ${pct(p.top1)}</small></li>`).join("")
     : `<li class="muted">No players yet - add one below.</li>`;
   list.querySelectorAll("li[data-id]").forEach((li) => li.addEventListener("click", () => selectPlayer(li.dataset.id)));
   const opts = players.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
@@ -168,29 +177,38 @@ async function selectPlayer(id) {
     .filter((r) => !seen.has(r.motif) && seen.add(r.motif)).slice(0, 4);
   const style = (p.style || []).filter((s) => Math.abs(s.delta) >= 0.15).slice(0, 10);
   const st = p.stats || {};
-  $("#profile").innerHTML = `
-    <div class="card">
+  const kindNote = {
+    real: "A real Lichess player (public games). Their 75 most recent rated blitz games were analysed.",
+    synthetic: "A synthetic test bot with deliberately built-in habits and blind spots, used to check that the profiler finds them.",
+    added: "A player you added.",
+    uploaded: "Built from an uploaded PGN.",
+  }[p.kind] || "";
+  $("#profile").innerHTML = `<div class="grid g6">
+    <div class="s6 cell">
+      <p class="kicker">${esc(KIND[p.kind] || "profile")}${st.rating ? ` · rating ${st.rating}` : ""}</p>
       <h2>${esc(p.name)}</h2>
-      <p class="muted">${st.games} games (${st.white_games} as White, ${st.black_games} as Black) · ${st.decisions} decisions analysed${st.avg_loss_pawns != null ? ` · engine match ${pct(st.engine_match)} · blunder rate ${pct(st.blunder_rate)}` : ""}</p>
-      <button class="primary" id="play-this">Predict ${esc(p.name)}'s moves →</button>
+      <p class="stats-line">${st.games} games (${st.white_games} as White, ${st.black_games} as Black) · ${st.decisions} decisions analysed${st.avg_loss_pawns != null ? ` · engine match ${pct(st.engine_match)} · blunder rate ${pct(st.blunder_rate)}` : ""}</p>
+      <p class="muted">${kindNote}</p>
+      <button class="primary" id="play-this">Guess ${esc(p.name)}'s moves →</button>
     </div>
-    <div class="card">
-      <h3>How well can we predict this player?</h3>
-      <p class="muted">Top-1 accuracy on ${p.heldout_games} held-out games the model never saw.</p>
+    <div class="s3 cell">
+      <h3>How predictable?</h3>
+      <p class="muted">Share of moves where the model's first guess was exactly the move played, on ${p.heldout_games} games it never saw.</p>
       ${acc.map(([n, v]) => barRow(n, v.top1, 1, `${pct(v.top1)}${v.top3 != null ? ` <small>top3 ${pct(v.top3)}</small>` : ""}`)).join("")}
     </div>
-    <div class="card">
-      <h3>Blind spots</h3>
-      <p class="muted">Index = how much more often they miss this kind of move than their own average (1.0 = average for them). Threats: they don't react. Walk-ins: they allow it. Opportunities: they don't play it.</p>
-      ${rows.length ? rows.map((r) => barRow(esc(r.label), r.index, 3, `×${r.index.toFixed(2)} <small>${r.missed}/${r.events}</small>`, "bad") + (r.examples || []).slice(0, 1).map((e) => `<div class="example">e.g. move ${e.move_number}: played ${esc(e.played)}, ${esc(e.note)}</div>`).join("")).join("") : `<p class="muted">No clear blind spot yet (needs more games).</p>`}
-      ${strengths.length ? `<h4>Sharp at</h4>${strengths.map((r) => `<span class="tag">${esc(r.label.replace(/^(Overlooks threats from|Misses winning|Walks into) /, ""))} ×${r.index.toFixed(2)}</span>`).join("")}` : ""}
-      ${(p.refutations && p.refutations.rows && p.refutations.rows.length) ? `<h4>What punishes their blunders (engine)</h4>${p.refutations.rows.slice(0, 4).map((r) => barRow(esc(r.label), r.lift, 3, `×${r.lift.toFixed(2)}`, r.lift > 1.2 ? "bad" : "")).join("")}` : ""}
-    </div>
-    <div class="card">
+    <div class="s3 cell">
       <h3>Style fingerprint</h3>
-      <p class="muted">How much more (→) or less (←) likely than an average player they are to pick a move with this property.</p>
+      <p class="muted">More (→, solid) or less (←, hatched) likely than an average player to pick a move with this property.</p>
       ${style.map((s) => divRow(esc(s.label), s.delta, `×${s.odds.toFixed(2)}`)).join("") || `<p class="muted">Plays like the average player.</p>`}
-    </div>`;
+    </div>
+    <div class="s6 cell">
+      <h3>Blind spots</h3>
+      <p class="muted">Index = how much more often they miss this kind of move than their own average (1.0 = their average). Threats: they don't react. Walk-ins: they allow it. Opportunities: they don't play it.</p>
+      ${rows.length ? rows.map((r) => barRow(esc(r.label), r.index, 3, `×${r.index.toFixed(2)} <small>${r.missed}/${r.events}</small>`) + (r.examples || []).slice(0, 1).map((e) => `<div class="example">e.g. move ${e.move_number}: played ${esc(e.played)}, ${esc(e.note)}</div>`).join("")).join("") : `<p class="muted">No clear blind spot yet (needs more games).</p>`}
+      ${strengths.length ? `<h4>Sharp at</h4>${strengths.map((r) => `<span class="tag">${esc(r.label.replace(/^(Overlooks threats from|Misses winning|Walks into) /, ""))} ×${r.index.toFixed(2)}</span>`).join("")}` : ""}
+      ${(p.refutations && p.refutations.rows && p.refutations.rows.length) ? `<h4>What punishes their blunders (engine)</h4>${p.refutations.rows.slice(0, 4).map((r) => barRow(esc(r.label), r.lift, 3, `×${r.lift.toFixed(2)}`)).join("")}` : ""}
+    </div>
+  </div>`;
   $("#play-this").addEventListener("click", () => { showView("play"); });
 }
 
@@ -276,7 +294,7 @@ const play = {
   },
   pick(uci) {
     this.guess = uci;
-    this.board.set({ arrows: [{ uci, color: COLORS.guess, width: 2.4 }] });
+    this.board.set({ arrows: [{ uci, kind: "guess", width: 2.4 }] });
     $("#submit-guess").disabled = false;
     $("#guess-label").textContent = `Your guess: ${uci}. Lock it in, or pick another move.`;
   },
@@ -288,9 +306,9 @@ const play = {
     $("#hint").classList.add("hidden");
     this.renderReveal(r, before);
     this.prevArrows = [
-      { uci: r.round.actual, color: COLORS.actual, width: 2.6 },
-      ...(r.round.model_top !== r.round.actual ? [{ uci: r.round.model_top, color: COLORS.model, width: 1.8, opacity: 0.7 }] : []),
-      ...(r.round.guess && r.round.guess !== r.round.actual ? [{ uci: r.round.guess, color: COLORS.guess, width: 1.6, opacity: 0.7 }] : []),
+      { uci: r.round.actual, kind: "actual", width: 2.6 },
+      ...(r.round.model_top !== r.round.actual ? [{ uci: r.round.model_top, kind: "model", width: 1.8, opacity: 0.7 }] : []),
+      ...(r.round.guess && r.round.guess !== r.round.actual ? [{ uci: r.round.guess, kind: "guess", width: 1.6, opacity: 0.7 }] : []),
     ];
     this.apply(r.state);
     this.prevArrows = [];
@@ -315,9 +333,9 @@ const play = {
     el.classList.remove("hidden");
     el.innerHTML = `
       <div class="verdict">${esc(before.player)} played <b>${esc(rd.actual_san)}</b></div>
-      <div>You: ${rd.guess_san ? `${esc(rd.guess_san)} <span class="${youOk ? "ok" : "no"}">${youOk ? "✓ +10" : "✗"}</span> <small>(model gave it ${pct(rd.p_guess)})</small>` : `<span class="muted">skipped</span>`}</div>
-      <div>Model: ${esc(rd.model_top_san)} <span class="${modelOk ? "ok" : "no"}">${modelOk ? "✓ +10" : "✗"}</span> <small>(gave the real move ${pct(rd.p_actual)})</small></div>
-      <div class="legend" style="margin-top:6px"><span><i style="background:${COLORS.actual}"></i>played</span><span><i style="background:${COLORS.model}"></i>model</span><span><i style="background:${COLORS.guess}"></i>you</span></div>
+      <div>You: ${rd.guess_san ? `${esc(rd.guess_san)} <span class="verdict-mark ${youOk ? "hit" : ""}">${youOk ? "✓ +10" : "✗ miss"}</span> <small>(model gave it ${pct(rd.p_guess)})</small>` : `<span class="muted">skipped</span>`}</div>
+      <div>Model: ${esc(rd.model_top_san)} <span class="verdict-mark ${modelOk ? "hit" : ""}">${modelOk ? "✓ +10" : "✗ miss"}</span> <small>(gave the real move ${pct(rd.p_actual)})</small></div>
+      <div class="legend"><span>${legendSvg("actual")}played</span><span>${legendSvg("model")}model</span><span>${legendSvg("guess")}you</span></div>
       <h4>Model's prediction</h4>
       ${movesList(pred, rd.actual)}
       ${perspectiveHtml(per, pred, r.reality)}`;
@@ -340,7 +358,7 @@ function perspectiveHtml(per, pred, reality) {
     const x = reality.find((r) => r[key] === mv);
     if (!x) return "";
     const v = key === "threat" ? x.player_reacted : x.player_found;
-    return `<span class="${v ? "ok" : "no"}">${key === "threat" ? (v ? "reacted" : "ignored it") : (v ? "found it" : "missed it")}</span>`;
+    return `<span class="verdict-mark ${v ? "hit" : ""}">${key === "threat" ? (v ? "reacted" : "ignored it") : (v ? "found it" : "missed it")}</span>`;
   };
   return `
     <h4>Through the player's eyes</h4>
@@ -377,7 +395,7 @@ const analyse = {
     const top = pred.moves.slice(0, 3);
     this.board.set({
       heat: $("#an-heat").checked ? pred.perspective.attention : null,
-      arrows: top.map((m, i) => ({ uci: m.uci, color: COLORS.model, width: 2.6 - i * 0.7, opacity: 0.9 - i * 0.2 })),
+      arrows: top.map((m, i) => ({ uci: m.uci, kind: "model", width: 2.6 - i * 0.7, opacity: 0.9 - i * 0.2 })),
     });
     const name = (players.find((p) => p.id === pid) || {}).name || pid;
     $("#an-out").innerHTML = `<h3>${esc(name)} as ${pred.turn}${pred.in_book ? ` <span class="tag">in their opening book</span>` : ""}</h3>${movesList(pred, null)}${perspectiveHtml(pred.perspective, pred, null)}`;
@@ -402,7 +420,7 @@ const live = {
   },
   async loadSimGames() {
     const pid = $("#lv-player").value;
-    if (!pid) { $("#lv-sim-game").innerHTML = ""; return; }
+    if (!pid) { $("#lv-sim-game").innerHTML = `<option value="">pick a profile above first</option>`; return; }
     const games = await api(`/api/players/${pid}/games`);
     $("#lv-sim-game").innerHTML = games.map((g) => `<option value="${g.index}">${esc(g.white)} – ${esc(g.black)} (${esc(g.result)})</option>`).join("");
   },
@@ -420,7 +438,7 @@ const live = {
   pick(uci) {
     this.guess = uci;
     $("#lv-lock").disabled = false;
-    this.board.set({ arrows: [{ uci, color: COLORS.guess, width: 2.4 }] });
+    this.board.set({ arrows: [{ uci, kind: "guess", width: 2.4 }] });
   },
   async lock() {
     if (!this.snap || !this.guess) return;
@@ -435,10 +453,10 @@ const live = {
     if (!pend || pend.guess) this.guess = pend && pend.guess;
     const show = $("#lv-show").checked || s.status === "finished";
     const arrows = [];
-    if (pend && pend.guess) arrows.push({ uci: pend.guess, color: COLORS.guess, width: 2.4 });
-    else if (this.guess && pend) arrows.push({ uci: this.guess, color: COLORS.guess, width: 2.4, opacity: 0.6 });
-    if (pend && show) pend.prediction.moves.slice(0, 3).forEach((m, i) => arrows.push({ uci: m.uci, color: COLORS.model, width: 2.4 - i * 0.6, opacity: 0.85 - i * 0.2 }));
-    if (!pend && s.last && s.last.actual) arrows.push({ uci: s.last.actual, color: COLORS.actual, width: 2.4 });
+    if (pend && pend.guess) arrows.push({ uci: pend.guess, kind: "guess", width: 2.4 });
+    else if (this.guess && pend) arrows.push({ uci: this.guess, kind: "guess", width: 2.4, opacity: 0.6 });
+    if (pend && show) pend.prediction.moves.slice(0, 3).forEach((m, i) => arrows.push({ uci: m.uci, kind: "model", width: 2.4 - i * 0.6, opacity: 0.85 - i * 0.2 }));
+    if (!pend && s.last && s.last.actual) arrows.push({ uci: s.last.actual, kind: "actual", width: 2.4 });
     this.board.set({ fen: s.fen, orientation: s.player_color || "white", legal: pend && !pend.guess ? s.legal : [], last: s.last_move, interactive: !!pend && !pend.guess, arrows, heat: pend && show ? pend.prediction.perspective.attention : null });
     $("#lv-title").textContent = `${s.white} – ${s.black}`;
     const sc = s.score;
@@ -467,22 +485,32 @@ const live = {
       const l = s.last;
       lastEl.classList.remove("hidden");
       lastEl.innerHTML = `<div class="verdict">${esc(s.player)} played <b>${esc(l.actual_san)}</b></div>
-        <div>Model: ${esc(l.model_top)} <span class="${l.model_hit ? "ok" : "no"}">${l.model_hit ? "✓" : "✗"}</span> <small>(gave the real move ${pct(l.p_actual)})</small></div>
-        <div>You: ${l.guess ? `${esc(l.guess)} <span class="${l.user_hit ? "ok" : "no"}">${l.user_hit ? "✓" : "✗"}</span>` : `<span class="muted">no guess</span>`}</div>
+        <div>Model: ${esc(l.model_top)} <span class="verdict-mark ${l.model_hit ? "hit" : ""}">${l.model_hit ? "✓ hit" : "✗ miss"}</span> <small>(gave the real move ${pct(l.p_actual)})</small></div>
+        <div>You: ${l.guess ? `${esc(l.guess)} <span class="verdict-mark ${l.user_hit ? "hit" : ""}">${l.user_hit ? "✓ hit" : "✗ miss"}</span>` : `<span class="muted">no guess</span>`}</div>
         ${!pend && l.perspective ? `<ul class="notes">${l.perspective.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`;
     } else lastEl.classList.add("hidden");
   },
 };
 
 // --------------------------------------------------------------------- map
-const TYPE_COLORS = ["#ff1f1f", "#f2f2f2", "#a66bff", "#4d8bff", "#ff8fb8", "#8a8a8a"];
+// Player types are told apart by shape, not colour (two-colour design).
+function typeMark(type, x, y, r, extra = "") {
+  const k = type % 6, sw = 1.6, f = (filled) => (filled ? `fill="${BLUE}" stroke="${BLUE}"` : `fill="${WHITE}" stroke="${BLUE}"`);
+  const d = r * 1.25;
+  if (k === 0) return `<circle cx="${x}" cy="${y}" r="${r}" ${f(true)} stroke-width="${sw}" ${extra}/>`;
+  if (k === 1) return `<circle cx="${x}" cy="${y}" r="${r}" ${f(false)} stroke-width="${sw}" ${extra}/>`;
+  if (k === 2) return `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" ${f(true)} stroke-width="${sw}" ${extra}/>`;
+  if (k === 3) return `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}" ${f(false)} stroke-width="${sw}" ${extra}/>`;
+  if (k === 4) return `<polygon points="${x},${y - d} ${x + d},${y} ${x},${y + d} ${x - d},${y}" ${f(true)} stroke-width="${sw}" ${extra}/>`;
+  return `<polygon points="${x},${y - d} ${x + d},${y} ${x},${y + d} ${x - d},${y}" ${f(false)} stroke-width="${sw}" ${extra}/>`;
+}
 const map = {
   data: null, sel: null,
   async load() {
     if (this.data) return this.render();
     try { this.data = await api("/api/map"); }
     catch (e) { $("#map-plot").innerHTML = `<p class="muted">${esc(e.message)}</p>`; return; }
-    const opts = this.data.components.map((c) => `<option value="${c.index - 1}">PC${c.index} · ${pct(c.explained)} var · reliability ${c.reliability.toFixed(2)}</option>`).join("");
+    const opts = this.data.components.map((c) => `<option value="${c.index - 1}">PC${c.index} · r ${c.split_half_r.toFixed(2)}</option>`).join("");
     $("#map-x").innerHTML = opts; $("#map-y").innerHTML = opts; $("#map-y").value = "1";
     $("#map-x").onchange = $("#map-y").onchange = () => this.render();
     this.render();
@@ -515,19 +543,19 @@ const map = {
       <text x="${W - pad}" y="${H - 8}" text-anchor="end">${esc(ax.pos)} →</text>`;
     d.players.forEach((p, i) => {
       const r = 4 + ((p.rating - 800) / 2200) * 5;
-      if (p.added) svg += `<circle cx="${sx(p.pc[xi]).toFixed(1)}" cy="${sy(p.pc[yi]).toFixed(1)}" r="${(Math.max(3, r) + 4).toFixed(1)}" fill="none" stroke="var(--ink)" stroke-width="1.5"/><text x="${(sx(p.pc[xi]) + Math.max(3, r) + 6).toFixed(1)}" y="${(sy(p.pc[yi]) + 4).toFixed(1)}" style="fill:var(--ink);font-weight:600">${esc(p.name)}</text>`;
-      svg += `<circle class="dot ${this.sel === p.id ? "sel" : ""}" data-i="${i}" cx="${sx(p.pc[xi]).toFixed(1)}" cy="${sy(p.pc[yi]).toFixed(1)}" r="${Math.max(3, r).toFixed(1)}" fill="${TYPE_COLORS[p.type % TYPE_COLORS.length]}" opacity="0.85"><title>${esc(p.name)} (${p.rating})</title></circle>`;
+      if (p.added) svg += `<circle cx="${sx(p.pc[xi]).toFixed(1)}" cy="${sy(p.pc[yi]).toFixed(1)}" r="${(Math.max(3, r) + 4).toFixed(1)}" fill="none" stroke="${BLUE}" stroke-width="1.5" stroke-dasharray="2 2"/><text x="${(sx(p.pc[xi]) + Math.max(3, r) + 6).toFixed(1)}" y="${(sy(p.pc[yi]) + 4).toFixed(1)}" style="font-weight:800">${esc(p.name)}</text>`;
+      svg += `<g class="dot ${this.sel === p.id ? "sel" : ""}" data-i="${i}"><title>${esc(p.name)} (${p.rating})</title>${typeMark(p.type, +sx(p.pc[xi]).toFixed(1), +sy(p.pc[yi]).toFixed(1), Math.max(3, r))}</g>`;
     });
-    svg += `</svg><p class="muted" style="margin:4px 8px">Each dot is a real Lichess blitz player; dot size = rating, colour = player type; ringed and named = players you added. Rating has been regressed out of the axes. Click a dot. Add players under <b>Players → Add a player</b>.</p>`;
+    svg += `</svg><p class="muted" style="margin:4px 8px">Each mark is a real Lichess blitz player; size = rating, shape = player type; dashed ring and name = players you added. Rating has been regressed out of the axes. Click a mark. Add players under <b>01 Profiles → + Add a player</b>.</p>`;
     $("#map-plot").innerHTML = svg;
     $("#map-plot").querySelectorAll(".dot").forEach((el) => el.addEventListener("click", () => this.pick(d.players[+el.dataset.i])));
-    const weak = d.silhouette < 0.25 ? `<p class="no" style="font-weight:400">Weak separation (silhouette ${d.silhouette}): players form a continuum, not distinct types. Read the axes; treat the colours as rough regions only.</p>` : "";
-    $("#map-types").innerHTML = `<div class="card"><h3>Player types (k-means, k=${d.k}, silhouette ${d.silhouette})</h3>${weak}${d.types.map((t) => `<div style="margin:6px 0"><span class="swatch" style="background:${TYPE_COLORS[t.type % TYPE_COLORS.length]}"></span><b>Type ${t.type + 1}</b> · ${t.size} players · mean rating ${t.mean_rating}<div class="why">${t.traits.slice(0, 4).map((x) => `${x.z > 0 ? "more" : "less"} ${esc(x.label)} (${x.z > 0 ? "+" : ""}${x.z})`).join(" · ")}</div></div>`).join("")}</div>`;
+    const weak = d.silhouette < 0.25 ? `<p class="no" style="font-weight:400">Weak separation (silhouette ${d.silhouette}): players form a continuum, not distinct types. Read the axes; treat the shapes as rough regions only.</p>` : "";
+    $("#map-types").innerHTML = `<div class="cell"><h3>Player types (k-means, k=${d.k}, silhouette ${d.silhouette})</h3>${weak}${d.types.map((t) => `<div style="margin:10px 0"><svg class="swatch" width="16" height="16" viewBox="0 0 16 16">${typeMark(t.type, 8, 8, 5)}</svg><b>Type ${t.type + 1}</b> · ${t.size} players · mean rating ${t.mean_rating}<div class="why">${t.traits.slice(0, 4).map((x) => `${x.z > 0 ? "more" : "less"} ${esc(x.label)} (${x.z > 0 ? "+" : ""}${x.z})`).join(" · ")}</div></div>`).join("")}</div>`;
   },
   side() {
     const d = this.data;
     const pr = d.prediction;
-    $("#map-side").innerHTML = `<div class="card"><h3>Is this real?</h3>
+    $("#map-side").innerHTML = `<div class="cell"><h3>Is this real?</h3>
       <p class="muted">Each player was also profiled twice, from two disjoint halves of their games. If an axis is a stable trait, both halves land in the same place (split-half r). Shuffled players give |r| ≤ ${d.null_split_half_r_95} (95%).</p>
       ${d.components.map((c) => barRow(`PC${c.index}`, Math.max(0, c.split_half_r), 1, `r ${c.split_half_r.toFixed(2)}`, c.split_half_r < 0.4 ? "neg" : "")).join("")}
       <h4>Prediction on held-out games (${pr.n} players)</h4>
@@ -535,8 +563,8 @@ const map = {
       ${barRow("Average-player model", pr.mean_top1.population, 1, pct(pr.mean_top1.population))}
       ${barRow("Stockfish top move", pr.mean_top1.engine_top_move, 1, pct(pr.mean_top1.engine_top_move))}
       <p class="muted">Personal model better log-loss for ${pr.players_with_better_logloss}/${pr.n} players.</p></div>
-      <div class="card" id="map-axes"><h3>What the axes mean</h3>${d.components.map((c) => `<h4>PC${c.index} <small>${pct(c.explained)} of variance</small></h4>${c.loadings.slice(0, 5).map((l) => divRow(esc(l.label), l.loading * 4, l.loading.toFixed(2))).join("")}`).join("")}</div>
-      <div class="card" id="map-player"><p class="muted">Click a player on the map.</p></div>`;
+      <div class="cell" id="map-axes"><h3>What the axes mean</h3>${d.components.map((c) => `<h4>PC${c.index} <small>${pct(c.explained)} of variance</small></h4>${c.loadings.slice(0, 5).map((l) => divRow(esc(l.label), l.loading * 4, l.loading.toFixed(2))).join("")}`).join("")}</div>
+      <div class="cell" id="map-player"><p class="muted">Click a player on the map.</p></div>`;
   },
   pick(p) {
     this.sel = p.id; this.render();
@@ -552,7 +580,7 @@ const map = {
 // A field of annotation marks: "?" (missed) on red, "!" (seen) on black.
 // Smooth value noise drifts over time; a click sends a ring that flips cells.
 const field = {
-  cell: 22, waves: [], t: 0, running: true,
+  cell: 20, waves: [], t: 0, running: true,
   init() {
     const c = $("#field");
     if (!c) return;
@@ -561,6 +589,7 @@ const field = {
     const resize = () => {
       const r = c.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
       c.width = Math.max(1, r.width * dpr); c.height = Math.max(1, r.height * dpr);
+      this.cell = r.width / 64;  // 8 field cells per page grid cell, like squares on a board
       this.dpr = dpr; this.cols = Math.ceil(r.width / this.cell) + 1; this.rows = Math.ceil(r.height / this.cell) + 1;
       this.draw();
     };
@@ -585,7 +614,7 @@ const field = {
     const { ctx, cell, dpr } = this;
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, this.c.width, this.c.height);
+    ctx.fillStyle = WHITE; ctx.fillRect(0, 0, this.c.width, this.c.height);
     ctx.font = `700 ${Math.round(cell * 0.5)}px "JetBrains Mono", monospace`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     this.waves = this.waves.filter((w) => this.t - w.t0 < 4);
     const z = this.t * 0.25;
@@ -596,8 +625,9 @@ const field = {
         if (Math.abs(d - front) < 1.6) on = !on;
       }
       const px = x * cell, py = y * cell;
-      if (on) { ctx.fillStyle = "#ff1f1f"; ctx.fillRect(px, py, cell, cell); ctx.fillStyle = "#000"; ctx.fillText("?", px + cell / 2, py + cell / 2 + 1); }
-      else { ctx.fillStyle = "rgba(255,31,31,.38)"; ctx.fillText("!", px + cell / 2, py + cell / 2 + 1); }
+      if (on) { ctx.fillStyle = BLUE; ctx.fillRect(px, py, cell + 0.5, cell + 0.5); ctx.fillStyle = WHITE; ctx.fillText("?", px + cell / 2, py + cell / 2 + 1); }
+      else { ctx.fillStyle = "rgba(0,0,255,.45)"; ctx.fillText("!", px + cell / 2, py + cell / 2 + 1); }
+      if (x % 8 === 0 && x) { ctx.fillStyle = BLUE; ctx.fillRect(px - 0.5, 0, 1, this.c.height); }
     }
   },
 };

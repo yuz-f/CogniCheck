@@ -120,6 +120,8 @@ def list_players():
                 "decisions": p.stats.get("decisions"),
                 "heldout_games": len(p.heldout),
                 "top1": (ev.get("personal_with_book") or ev.get("personal") or {}).get("top1"),
+                "rating": p.stats.get("rating"),
+                "kind": _kind(p),
                 "engine": p.engine,
             }
         )
@@ -137,9 +139,30 @@ def player_map():
     return json.loads(PCA_OUT.read_text())
 
 
+def _kind(p: Profile) -> str:
+    """real (cohort), added (user-added via cohort pipeline), synthetic (persona) or uploaded."""
+    from .personas import PERSONAS
+
+    if p.name in {x.name for x in PERSONAS}:
+        return "synthetic"
+    src = p.stats.get("source")
+    if not src:
+        return "uploaded"
+    from .cohort import PLAYERS
+
+    try:
+        import json as _json
+
+        added = {x["id"] for x in _json.loads(PLAYERS.read_text()) if x.get("added")}
+    except Exception:
+        added = set()
+    return "added" if p.id in added else ("real" if "lichess" in src else "uploaded")
+
+
 @app.get("/api/players/{pid}")
 def player(pid: str):
-    return get_profile(pid).summary()
+    prof = get_profile(pid)
+    return prof.summary() | {"kind": _kind(prof)}
 
 
 @app.get("/api/players/{pid}/games")

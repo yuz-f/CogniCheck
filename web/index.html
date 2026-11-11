@@ -4,167 +4,180 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CogniCheck</title>
-  <meta name="theme-color" content="#000000">
+  <meta name="theme-color" content="#0000ff">
   <link rel="preload" href="/static/fonts/archivo-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <header class="top">
-    <div class="brand">Cogni<span>Check</span></div>
-    <nav>
-      <button data-view="players" class="active">Players</button>
-      <button data-view="play">Play</button>
-      <button data-view="live">Live</button>
-      <button data-view="map">Map</button>
-      <button data-view="analyse">Analyse</button>
+  <!-- The page is laid out like a chess board: an 8-column grid of equal cells
+       separated by 1px blue lines. Everything spans whole cells. -->
+  <header class="top grid g8">
+    <div class="brand s2 cell">Cogni<b>Check</b></div>
+    <nav class="tabs s5" aria-label="Sections">
+      <button data-view="players" class="active"><i>01</i>Profiles<small>who they are</small></button>
+      <button data-view="play"><i>02</i>Guess<small>predict a past game</small></button>
+      <button data-view="live"><i>03</i>Live<small>follow a game now</small></button>
+      <button data-view="map"><i>04</i>Map<small>compare minds</small></button>
+      <button data-view="analyse"><i>05</i>Explore<small>any position</small></button>
     </nav>
-    <div id="engine-badge" class="badge"></div>
+    <div id="engine-badge" class="badge s1 cell"></div>
   </header>
 
-  <section class="hero" id="hero" aria-label="CogniCheck">
-    <canvas id="field" aria-hidden="true"></canvas>
-    <div class="hint">click the field</div>
-    <div class="plate">
-      <h1>Predict the player.<br>Not the move.</h1>
-      <p>Personal move models, blind spots and a map of how real players think.</p>
-    </div>
-    <div class="legend-field">? missed &nbsp;·&nbsp; ! seen</div>
-  </section>
-
   <main>
-    <!-- PLAYERS ---------------------------------------------------------->
+    <section class="hero grid g8" id="hero" aria-label="CogniCheck">
+      <div class="s8 field-wrap">
+        <canvas id="field" aria-hidden="true"></canvas>
+        <div class="plate">
+          <h1>Predict the player.<br>Not the move.</h1>
+          <p>Personal move models, blind spots and a map of how real players think.</p>
+        </div>
+        <div class="hint">click the field · ? missed · ! seen</div>
+      </div>
+    </section>
+
+    <!-- 01 PROFILES ------------------------------------------------------>
     <section id="view-players" class="view active">
-      <div class="grid-2">
-        <div>
-          <h2>Players</h2>
-          <p class="muted">Each player gets a personal model trained only on their own games. Pick one to see how they think.</p>
+      <div class="grid g8">
+        <div class="s2 cell intro">
+          <h2>Profiles</h2>
+          <p>Every player here has a personal model trained only on their own games. Pick one to read how they play: how predictable they are, their blind spots and their style.</p>
+        </div>
+        <div class="s6 cell intro">
+          <p class="kicker">How to use</p>
+          <p><b>01 Profiles</b> pick or add a player. <b>02 Guess</b> replay one of their games the model never saw and race it. <b>03 Live</b> follow a game as it is played. <b>04 Map</b> see where they sit among 80+ real players. <b>05 Explore</b> set up any position and see it through their eyes.</p>
+        </div>
+        <div class="s2 col">
           <ul id="player-list" class="player-list"></ul>
-          <details class="card">
-            <summary>Add a player</summary>
+          <details class="cell add">
+            <summary>+ Add a player</summary>
             <div class="form">
               <label>Lichess username <input id="lichess-user" placeholder="e.g. your_handle"></label>
               <label>or Chess.com username <input id="chesscom-user"></label>
               <label>or paste PGN <textarea id="pgn-text" rows="5" placeholder="[Event ...]"></textarea></label>
-              <label>Player name in the PGN (optional) <input id="pgn-player"></label>
-              <label>Rating (only needed for PGN / Chess.com if the PGN has no Elo) <input id="add-rating" type="number" min="100" max="3500"></label>
-              <label class="toggle"><input type="checkbox" id="add-map" checked> also place this player on the cognition map (PCA)</label>
+              <label>Player name in the PGN <input id="pgn-player" placeholder="optional"></label>
+              <label>Rating (PGN / Chess.com without Elo) <input id="add-rating" type="number" min="100" max="3500"></label>
+              <label class="toggle"><input type="checkbox" id="add-map" checked> also place on the map</label>
               <label>PGN file <input id="pgn-file" type="file" accept=".pgn,text/plain"></label>
               <button id="build-btn" class="primary">Build profile</button>
               <div id="build-status" class="muted"></div>
             </div>
           </details>
         </div>
-        <div id="profile" class="profile"><p class="muted">Select a player.</p></div>
+        <div id="profile" class="s6 profile"><div class="cell"><p class="muted">Select a player.</p></div></div>
       </div>
     </section>
 
-    <!-- PLAY ------------------------------------------------------------->
+    <!-- 02 GUESS ---------------------------------------------------------->
     <section id="view-play" class="view">
-      <div class="play-layout">
-        <div class="board-col">
-          <div class="scorebar">
+      <div class="grid g8">
+        <div class="s4 col board-col">
+          <div class="scorebar cell">
             <div><span class="label">You</span> <b id="score-user">0</b> <small id="hits-user"></small></div>
             <div id="game-title" class="muted"></div>
             <div><span class="label">Model</span> <b id="score-model">0</b> <small id="hits-model"></small></div>
           </div>
           <div id="play-board" class="board"></div>
-          <div class="controls">
+          <div class="controls cell">
             <button id="submit-guess" class="primary" disabled>Lock in guess</button>
-            <button id="hint-btn">Hint (−2)</button>
+            <button id="hint-btn">Hint −2</button>
             <button id="skip-btn">Skip</button>
             <button id="new-game-btn">New game</button>
           </div>
-          <p id="guess-label" class="muted center"></p>
-          <div id="history" class="history"></div>
+          <div class="cell">
+            <p id="guess-label" class="status"></p>
+            <div id="history" class="history"></div>
+          </div>
         </div>
-        <div class="side-col">
-          <div class="card" id="play-intro">
+        <div class="s4 col side-col">
+          <div class="cell" id="play-intro">
             <h3>Predict the player, not the best move</h3>
-            <p>You are watching a real game of <b id="intro-player">…</b> that the model has never seen. On each of their turns, click the move <em>you think they actually played</em>. The model guesses too. After each reveal you see how the model reads the position through the player's eyes: what they notice, what they overlook, where their attention is.</p>
+            <p>You watch a real game of <b id="intro-player">…</b> that the model has never seen. On each of their turns, click the move <em>you think they actually played</em>. The model guesses too. After each reveal you see how the model reads the position through the player's eyes.</p>
             <label>Player <select id="play-player"></select></label>
             <label>Game <select id="play-game"></select></label>
             <button id="start-btn" class="primary">Start</button>
           </div>
-          <div id="reveal" class="card hidden"></div>
-          <div id="hint" class="card hidden"></div>
+          <div id="reveal" class="cell hidden"></div>
+          <div id="hint" class="cell hidden"></div>
         </div>
       </div>
     </section>
 
-    <!-- LIVE --------------------------------------------------------------->
+    <!-- 03 LIVE ----------------------------------------------------------->
     <section id="view-live" class="view">
-      <div class="play-layout">
-        <div class="board-col">
-          <div class="scorebar">
+      <div class="grid g8">
+        <div class="s4 col board-col">
+          <div class="scorebar cell">
             <div><span class="label">You</span> <b id="lv-user">0</b> <small id="lv-user-n"></small></div>
             <div id="lv-title" class="muted"></div>
             <div><span class="label">Model</span> <b id="lv-model">0</b> <small id="lv-model-n"></small></div>
           </div>
           <div id="lv-board" class="board"></div>
-          <div class="controls">
+          <div class="controls cell">
             <button id="lv-lock" class="primary" disabled>Lock in guess</button>
-            <label class="toggle"><input type="checkbox" id="lv-show"> show model's prediction before the move</label>
+            <label class="toggle"><input type="checkbox" id="lv-show"> show prediction before the move</label>
           </div>
-          <p id="lv-status" class="muted center"></p>
-          <div id="lv-clock" class="muted center"></div>
-          <div id="lv-history" class="history"></div>
+          <div class="cell">
+            <p id="lv-status" class="status"></p>
+            <div id="lv-clock" class="muted"></div>
+            <div id="lv-history" class="history"></div>
+          </div>
         </div>
-        <div class="side-col">
-          <div class="card" id="lv-setup">
+        <div class="s4 col side-col">
+          <div class="cell" id="lv-setup">
             <h3>Follow a game live</h3>
-            <p class="muted">The model predicts the profiled player's move the moment it is their turn, before the move is played. Lock in your own guess before the move arrives.</p>
-            <label>Lichess game link, game ID, or username (follows their current game)
-              <input id="lv-source" placeholder="https://lichess.org/abcd1234 or a username"></label>
+            <p class="muted">The model predicts the player's move the moment it is their turn, before it is played. Lock in your own guess before the move arrives.</p>
+            <label>Lichess game link, game ID, or username <input id="lv-source" placeholder="https://lichess.org/abcd1234 or a username"></label>
             <label>Profile to use <select id="lv-player"><option value="">match by player name</option></select></label>
-            <label>If that profile isn't a player in this game, it plays <select id="lv-color"><option value="">-</option><option>white</option><option>black</option></select></label>
+            <label>If that profile isn't in the game, it plays <select id="lv-color"><option value="">-</option><option>white</option><option>black</option></select></label>
             <button id="lv-start" class="primary">Follow live</button>
             <h4>No live game handy?</h4>
-            <label>Simulate: replay a held-out game of the selected profile as if it were live
-              <select id="lv-sim-game"></select></label>
+            <label>Replay a held-out game of the selected profile as if it were live <select id="lv-sim-game"></select></label>
             <label>Seconds per move <input id="lv-delay" type="number" value="4" min="1" max="60"></label>
             <button id="lv-sim">Simulate live</button>
           </div>
-          <div id="lv-pred" class="card hidden"></div>
-          <div id="lv-last" class="card hidden"></div>
+          <div id="lv-pred" class="cell hidden"></div>
+          <div id="lv-last" class="cell hidden"></div>
         </div>
       </div>
     </section>
 
-    <!-- MAP --------------------------------------------------------------->
+    <!-- 04 MAP ------------------------------------------------------------>
     <section id="view-map" class="view">
-      <div class="play-layout map-layout">
-        <div>
-          <div class="controls">
+      <div class="grid g8">
+        <div class="s4 col">
+          <div class="controls cell">
             <label>X axis <select id="map-x"></select></label>
             <label>Y axis <select id="map-y"></select></label>
           </div>
-          <div id="map-plot" class="card map-plot"></div>
-          <div id="map-types"></div>
+          <div id="map-plot" class="cell map-plot"></div>
+          <div id="map-types" class="col"></div>
         </div>
-        <div class="side-col" id="map-side"></div>
+        <div class="s4 col side-col" id="map-side"></div>
       </div>
     </section>
 
-    <!-- ANALYSE ---------------------------------------------------------->
+    <!-- 05 EXPLORE -------------------------------------------------------->
     <section id="view-analyse" class="view">
-      <div class="play-layout">
-        <div class="board-col">
+      <div class="grid g8">
+        <div class="s4 col board-col">
+          <div class="controls cell">
+            <label>Whose eyes? <select id="an-player"></select></label>
+          </div>
           <div id="an-board" class="board"></div>
-          <div class="controls">
+          <div class="controls cell">
             <button id="an-undo">Undo</button>
             <button id="an-flip">Flip</button>
             <button id="an-reset">Reset</button>
             <label class="toggle"><input type="checkbox" id="an-heat" checked> attention</label>
           </div>
-          <label class="fen">FEN <input id="an-fen"><button id="an-load">Load</button></label>
-          <div id="an-history" class="history"></div>
-        </div>
-        <div class="side-col">
-          <div class="card">
-            <label>Whose eyes? <select id="an-player"></select></label>
-            <p class="muted">Make moves for either side. The panel shows what <b>this</b> player would most likely play if it were their turn, and how they probably perceive the position.</p>
+          <div class="cell">
+            <label class="fen">FEN <span class="fen-row"><input id="an-fen"><button id="an-load">Load</button></span></label>
+            <div id="an-history" class="history"></div>
           </div>
-          <div id="an-out" class="card"></div>
+        </div>
+        <div class="s4 col side-col">
+          <div class="cell"><p class="muted">Make moves for either side. This panel shows what <b>the selected player</b> would most likely play if it were their turn, and how they probably perceive the position.</p></div>
+          <div id="an-out" class="cell"></div>
         </div>
       </div>
     </section>
