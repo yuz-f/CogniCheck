@@ -190,6 +190,7 @@ svg.arrows { position: absolute; inset: 0; width: 100%; height: 100%; pointer-ev
 .bar.div::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--blue); }
 .bar i.neg { background: repeating-linear-gradient(135deg, var(--blue) 0 2px, transparent 2px 5px); }
 .num { font: 600 .78rem/1 var(--mono); min-width: 3.6em; text-align: right; }
+.bar-row.faint { opacity: .45; }
 
 /* ------------------------------------------------------------ move lists */
 .moves { list-style: none; padding: 0; margin: 0 calc(-1 * var(--pad)); }

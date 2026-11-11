@@ -32,7 +32,7 @@ import chess
 import numpy as np
 
 from . import model, tactics
-from .features import FEATURE_LABEL, FEATURE_NAMES, IDX
+from .features import FEATURE_LABEL, FEATURE_NAMES, IDX, build_habits, habit_values
 from .ingest import USER_AGENT, games_of, parse_pgn
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -152,6 +152,8 @@ def _analyse_player(pid: str, username: str, depth: int, progress=None) -> str:
             engine.close()
     ds = model.Dataset.from_positions([(d.pa.X, d.chosen) for d in decisions])
     game_of = np.array([d.game_index for d in decisions if len(d.pa.moves) > 1])
+    codes = np.concatenate([d.pa.codes for d in decisions if len(d.pa.moves) > 1]) if decisions else np.zeros(0, np.int16)
+    tp_of = np.array([d.pa.time_pressure for d in decisions if len(d.pa.moves) > 1], dtype=bool)
     halves = {
         "all": decisions,
         "A": [d for d in decisions if d.game_index % 2 == 0],
@@ -160,7 +162,7 @@ def _analyse_player(pid: str, username: str, depth: int, progress=None) -> str:
     extra = {k: {"blind_spots": blind_spot_stats(v), "refutations": engine_refutations(v)} for k, v in halves.items()}
     extra["games"] = len(games)
     extra["white_games"] = sum(g.color == chess.WHITE for g in games)
-    np.savez_compressed(out, X=ds.X.astype(np.float16), starts=ds.starts, chosen=ds.chosen, game=game_of)
+    np.savez_compressed(out, X=ds.X.astype(np.float16), starts=ds.starts, chosen=ds.chosen, game=game_of, code=codes, tp=tp_of)
     (ANALYSIS / f"{pid}.json").write_text(json.dumps(extra))
     return pid
 
@@ -184,13 +186,46 @@ def analyse_all(workers: int = 4, depth: int = 5) -> None:
 # --------------------------------------------------------------------- fit
 def _load_ds(pid: str) -> tuple[model.Dataset, np.ndarray]:
     z = np.load(ANALYSIS / f"{pid}.npz")
-    return model.Dataset(z["X"].astype(np.float64), z["starts"], z["chosen"]), z["game"]
+    ds = model.Dataset(z["X"].astype(np.float64), z["starts"], z["chosen"])
+    ds.code = z["code"] if "code" in z else None  # type: ignore[attr-defined]
+    ds.tp = z["tp"] if "tp" in z else None  # type: ignore[attr-defined]
+    return ds, z["game"]
+
+
+def _fill_habits(ds: model.Dataset, from_mask: np.ndarray) -> tuple[dict, float]:
+    """Compute habits from the positions in ``from_mask`` and write the habit
+    feature for every position (leave-one-out for the positions in the mask).
+    Returns the table so it can be stored in the profile."""
+    codes = getattr(ds, "code", None)
+    if codes is None:
+        return {}, 0.0
+    ends = np.append(ds.starts[1:], len(ds.X))
+    pos = [(codes[s:e], int(c - s)) for s, e, c, m in zip(ds.starts, ends, ds.chosen, from_mask) if m]
+    table, base = build_habits(pos)
+    for s_, e, c, m in zip(ds.starts, ends, ds.chosen, from_mask):
+        ds.X[s_:e, IDX["habit"]] = habit_values(codes[s_:e], table, base, int(c - s_) if m else None)
+    return table, base
 
 
 def _subset(ds: model.Dataset, mask_pos: np.ndarray) -> model.Dataset:
     ends = np.append(ds.starts[1:], len(ds.X))
     pos = [(ds.X[s:e], int(c - s)) for s, e, c, m in zip(ds.starts, ends, ds.chosen, mask_pos) if m]
     return model.Dataset.from_positions(pos)
+
+
+def _time_pressure(ds: model.Dataset) -> dict | None:
+    tp = getattr(ds, "tp", None)
+    if tp is None or tp.sum() < 20 or (~tp).sum() == 0:
+        return None
+    loss = ds.X[ds.chosen, IDX["eng_loss"]]
+    return {
+        "decisions": int(tp.sum()),
+        "share": round(float(tp.mean()), 3),
+        "blunder_rate": round(float((loss[tp] >= 2).mean()), 3),
+        "blunder_rate_normal": round(float((loss[~tp] >= 2).mean()), 3),
+        "avg_loss": round(float(loss[tp].mean()), 3),
+        "avg_loss_normal": round(float(loss[~tp].mean()), 3),
+    }
 
 
 def _engine_stats(ds: model.Dataset) -> dict:
@@ -206,6 +241,7 @@ def train_population(players: list[dict]) -> np.ndarray:
     pooled = []
     for p in players:
         ds, _ = _load_ds(p["id"])
+        _fill_habits(ds, np.ones(len(ds), bool))
         idx = rng.choice(len(ds), size=min(600, len(ds)), replace=False)
         pooled.append(_subset(ds, np.isin(np.arange(len(ds)), idx)))
     big = model.Dataset.from_positions([(d.X[s:e], int(c - s)) for d in pooled for s, e, c in zip(d.starts, np.append(d.starts[1:], len(d.X)), d.chosen)])
@@ -225,13 +261,14 @@ def load_population() -> np.ndarray:
 
 def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: float = 0.15):
     """Personal model (all games + two halves), evaluation, profile and cognition vector."""
-    from .profile import Profile, build_book, slugify, style_summary
+    from .profile import Profile, build_book, learned_blind_spots, slugify, style_summary
 
     ds, game = _load_ds(p["id"])
     extra = json.loads((ANALYSIS / f"{p['id']}.json").read_text())
     n_games = extra["games"]
     hold = set(range(n_games)[: max(1, int(round(n_games * holdout_frac)))])
     train_mask = np.array([g not in hold for g in game])
+    _fill_habits(ds, train_mask)  # held-out positions get habits learned from training games only
     ds_train, ds_test = _subset(ds, train_mask), _subset(ds, ~train_mask)
     w_eval = model.fit(ds_train, prior=prior, lam=lam)
     ev = {
@@ -243,7 +280,17 @@ def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: floa
     ev["engine_top_move"] = {"top1": float(np.mean([loss_test[c] == loss_test[s:e].min() for s, e, c in zip(ds_test.starts, ends, ds_test.chosen)]))}
     ev["random"] = {"top1": float(np.mean(1.0 / np.diff(np.append(ds_test.starts, len(ds_test.X)))))}
     masks = {"all": np.ones(len(ds), bool), "A": game % 2 == 0, "B": game % 2 == 1}
-    fits = {k: model.fit(_subset(ds, m), prior=prior, lam=lam) for k, m in masks.items()}
+    fits, tables = {}, {}
+    for k, m in masks.items():
+        tables[k] = _fill_habits(ds, m)
+        fits[k] = model.fit(_subset(ds, m), prior=prior, lam=lam)
+    table_all, base_all = tables["all"]
+    ds_all = _subset(ds, masks["all"])
+    se_all = model.standard_errors(fits["all"], ds_all, lam)
+    style = style_summary(fits["all"], prior, se_all)
+    blind = extra["all"]["blind_spots"]
+    blind["learned"] = learned_blind_spots(style)
+    tp_stats = _time_pressure(ds)
     vectors = {k: cognition_vector(fits[k], prior, extra[k]["blind_spots"], _engine_stats(_subset(ds, masks[k]))) for k in fits}
     # Full profile for the web app (book + held-out games from the PGN).
     pgs = games_of(parse_pgn((GAMES / f"{p['id']}.pgn").read_text()), p["username"])
@@ -253,13 +300,14 @@ def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: floa
         weights=fits["all"],
         prior=prior,
         book=build_book([g for i, g in enumerate(pgs) if i not in hold]),
-        blind_spots=extra["all"]["blind_spots"],
+        blind_spots=blind,
         refutations=extra["all"]["refutations"],
-        style=style_summary(fits["all"], prior),
+        style=style,
         evaluation=ev,
         heldout=[g.pgn() for i, g in enumerate(pgs) if i in hold],
-        stats={"games": n_games, "decisions": len(ds), "white_games": extra["white_games"], "black_games": n_games - extra["white_games"], "rating": p["rating"], "source": p.get("source", "lichess blitz")} | {k: round(v, 3) for k, v in _engine_stats(ds).items()},
+        stats={"games": n_games, "decisions": len(ds), "white_games": extra["white_games"], "black_games": n_games - extra["white_games"], "rating": p["rating"], "source": p.get("source", "lichess blitz")} | {k: round(v, 3) for k, v in _engine_stats(ds).items()} | ({"time_pressure": tp_stats} if tp_stats else {}),
         engine=True,
+        habits={"table": table_all, "base_rate": base_all},
     )
     PROFILES_REAL.mkdir(parents=True, exist_ok=True)
     prof.save(PROFILES_REAL)
@@ -392,7 +440,7 @@ def _finish_add(entry, pid, username, depth, prior, step) -> dict:
 
 
 # ---------------------------------------------------------------------- PCA
-STYLE_SKIP = {"eng_loss", "eng_best", "eng_blunder"}  # represented by the stats block
+STYLE_SKIP = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "tp_hangs", "tp_capture"}  # strength / sparse
 
 
 def cognition_vector(w: np.ndarray, prior: np.ndarray, blind: dict, stats: dict) -> dict[str, float]:

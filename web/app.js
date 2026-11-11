@@ -148,11 +148,11 @@ function barRow(label, value, max, text, cls = "") {
   const w = Math.max(0, Math.min(100, (value / max) * 100));
   return `<div class="bar-row"><span>${label}</span><div class="bar"><i class="${cls}" style="width:${w}%"></i></div><span class="num">${text}</span></div>`;
 }
-function divRow(label, delta, text) {
+function divRow(label, delta, text, cls = "") {
   // diverging bar around the centre, delta in log-odds
   const w = Math.min(50, Math.abs(delta) * 25);
   const style = delta >= 0 ? `left:50%;width:${w}%` : `left:${50 - w}%;width:${w}%`;
-  return `<div class="bar-row"><span>${label}</span><div class="bar div"><i class="${delta < 0 ? "neg" : ""}" style="${style}"></i></div><span class="num">${text}</span></div>`;
+  return `<div class="bar-row ${cls}"><span>${label}</span><div class="bar div"><i class="${delta < 0 ? "neg" : ""}" style="${style}"></i></div><span class="num">${text}</span></div>`;
 }
 
 async function selectPlayer(id) {
@@ -175,7 +175,10 @@ async function selectPlayer(id) {
   const seen = new Set();
   const strengths = (bs.rows || []).filter((r) => r.index <= 0.8).reverse()
     .filter((r) => !seen.has(r.motif) && seen.add(r.motif)).slice(0, 4);
-  const style = (p.style || []).filter((s) => Math.abs(s.delta) >= 0.15).slice(0, 10);
+  const reliable = (p.style || []).filter((s) => s.reliable && Math.abs(s.delta) >= 0.1);
+  const style = reliable.length ? reliable.slice(0, 10) : (p.style || []).filter((s) => Math.abs(s.delta) >= 0.15).slice(0, 8);
+  const learned = (bs.learned || []).filter((r) => r.reliable);
+  const tp = st.time_pressure;
   const st = p.stats || {};
   const kindNote = {
     real: "A real Lichess player (public games). Their 75 most recent rated blitz games were analysed.",
@@ -189,6 +192,7 @@ async function selectPlayer(id) {
       <h2>${esc(p.name)}</h2>
       <p class="stats-line">${st.games} games (${st.white_games} as White, ${st.black_games} as Black) · ${st.decisions} decisions analysed${st.avg_loss_pawns != null ? ` · engine match ${pct(st.engine_match)} · blunder rate ${pct(st.blunder_rate)}` : ""}</p>
       <p class="muted">${kindNote}</p>
+      ${tp ? `<p class="stats-line">Short of time (${pct(tp.share)} of moves): blunder rate ${pct(tp.blunder_rate)} vs ${pct(tp.blunder_rate_normal)} normally · average loss ${tp.avg_loss.toFixed(2)} vs ${tp.avg_loss_normal.toFixed(2)} pawns.</p>` : ""}
       <button class="primary" id="play-this">Guess ${esc(p.name)}'s moves →</button>
     </div>
     <div class="s3 cell">
@@ -198,12 +202,16 @@ async function selectPlayer(id) {
     </div>
     <div class="s3 cell">
       <h3>Style fingerprint</h3>
-      <p class="muted">More (→, solid) or less (←, hatched) likely than an average player to pick a move with this property.</p>
-      ${style.map((s) => divRow(esc(s.label), s.delta, `×${s.odds.toFixed(2)}`)).join("") || `<p class="muted">Plays like the average player.</p>`}
+      <p class="muted">More (→, solid) or less (←, hatched) likely than an average player to pick a move with this property. ${reliable.length ? "Only traits that are clear beyond noise (±2 standard errors) are shown." : "No trait is clear beyond noise yet; the strongest hints are shown faded."}</p>
+      ${style.map((s) => divRow(esc(s.label), s.delta, `×${s.odds.toFixed(2)}${s.se ? ` <small>±${(s.se).toFixed(2)}</small>` : ""}`, s.reliable ? "" : "faint")).join("") || `<p class="muted">Plays like the average player.</p>`}
     </div>
     <div class="s6 cell">
       <h3>Blind spots</h3>
-      <p class="muted">Index = how much more often they miss this kind of move than their own average (1.0 = their average). Threats: they don't react. Walk-ins: they allow it. Opportunities: they don't play it.</p>
+      ${learned.length ? `<p class="kicker">Learned by the model</p>
+      <p class="muted">How much more readily than an average player they allow a tactic of this kind, once the material it costs is accounted for (×1 = average). These weights are used in every prediction.</p>
+      ${learned.map((r) => divRow(esc(r.label.replace(/^allows /, "")), r.delta, `×${r.odds.toFixed(2)} <small>±${(r.se || 0).toFixed(2)}</small>`)).join("")}
+      <p class="kicker">Counted in their games</p>` : `<p class="muted">The model found no blind spot clear beyond noise for this player. Below: what the counts suggest.</p>`}
+      <p class="muted">Index = how much more often they miss this kind of move than their own average (1.0 = their average). Threats: they don't react. Walk-ins: they allow it. Opportunities: they don't play it. Small counts are shrunk towards 1.</p>
       ${rows.length ? rows.map((r) => barRow(esc(r.label), r.index, 3, `×${r.index.toFixed(2)} <small>${r.missed}/${r.events}</small>`) + (r.examples || []).slice(0, 1).map((e) => `<div class="example">e.g. move ${e.move_number}: played ${esc(e.played)}, ${esc(e.note)}</div>`).join("")).join("") : `<p class="muted">No clear blind spot yet (needs more games).</p>`}
       ${strengths.length ? `<h4>Sharp at</h4>${strengths.map((r) => `<span class="tag">${esc(r.label.replace(/^(Overlooks threats from|Misses winning|Walks into) /, ""))} ×${r.index.toFixed(2)}</span>`).join("")}` : ""}
       ${(p.refutations && p.refutations.rows && p.refutations.rows.length) ? `<h4>What punishes their blunders (engine)</h4>${p.refutations.rows.slice(0, 4).map((r) => barRow(esc(r.label), r.lift, 3, `×${r.lift.toFixed(2)}`)).join("")}` : ""}
@@ -345,7 +353,7 @@ const play = {
 function movesList(pred, actual) {
   return `<ul class="moves">${pred.moves.map((m) => `<li><span class="san">${esc(m.san)}${m.uci === actual ? " ✓" : ""}</span> ${barInline(m.p)} <span class="num">${pct(m.p)}</span>
       ${m.book ? `<span class="tag">played ${m.book}× here before</span>` : ""}
-      <div class="why">${m.reasons.map((x) => `${x.effect > 0 ? "+" : "−"} ${esc(x.label)}${Math.abs(x.personal) >= 0.2 ? ` <b>(${x.personal > 0 ? "especially" : "unusually rarely"} for this player)</b>` : ""}`).join(" · ")}</div></li>`).join("")}</ul>
+      <div class="why">${m.reasons.map((x) => `${x.effect > 0 ? "+" : "−"} ${x.has === false ? "not: " : ""}${esc(x.label)}${Math.abs(x.personal) >= 0.2 ? ` <b>(${x.personal > 0 ? "especially" : "unusually rarely"} for this player)</b>` : ""}`).join(" · ")}</div></li>`).join("")}</ul>
     ${pred.engine_best ? `<p class="muted">Engine's best: <b>${esc(pred.engine_best.san)}</b> - this player finds it ${pct(pred.engine_best.p)} (rank ${pred.engine_best.rank} in their eyes).</p>` : ""}`;
 }
 function barInline(p) { return `<span class="bar" style="display:inline-block;width:90px;vertical-align:middle"><i style="width:${Math.round(p * 100)}%"></i></span>`; }

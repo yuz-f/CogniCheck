@@ -26,7 +26,7 @@ import numpy as np
 
 from . import model, tactics
 from .engine import Engine
-from .features import FEATURE_LABEL, FEATURE_NAMES, IDX, PositionAnalysis, addresses_threat, analyse_position
+from .features import ALLOW_MOTIFS, FEATURE_LABEL, FEATURE_NAMES, IDX, PositionAnalysis, addresses_threat, analyse_position, build_habits, habit_values
 from .ingest import PlayerGame
 
 BOOK_PLIES = 24
@@ -52,19 +52,42 @@ class Decision:
     ply: int
 
 
+def base_time(time_control: str | None) -> float | None:
+    """'180+2' -> 180."""
+    if not time_control:
+        return None
+    try:
+        return float(time_control.split("+")[0])
+    except ValueError:
+        return None
+
+
 def iter_decisions(pg: PlayerGame, game_index: int, engine: Engine | None, max_plies: int = 200):
     board = pg.game.board()
-    for ply, move in enumerate(pg.game.mainline_moves()):
+    base = base_time(pg.game.headers.get("TimeControl"))
+    my_clock = None  # seconds left after the player's previous move
+    for ply, node in enumerate(pg.game.mainline()):
+        move = node.move
         if ply >= max_plies:
             break
         if board.turn == pg.color and board.legal_moves.count() > 1:
-            pa = analyse_position(board, engine)
+            pa = analyse_position(board, engine, time_left=my_clock, base_time=base)
             try:
                 idx = pa.index(move)
             except ValueError:
                 break
             yield Decision(pa, idx, game_index, ply)
+        if board.turn == pg.color:
+            c = node.clock()
+            if c is not None:
+                my_clock = c
         board.push(move)
+
+
+def fill_habits(decisions: list["Decision"], table: dict, base_rate: float, loo: bool) -> None:
+    """Write the habit feature into each decision's feature matrix."""
+    for d in decisions:
+        d.pa.X[:, IDX["habit"]] = habit_values(d.pa.codes, table, base_rate, d.chosen if loo else None)
 
 
 class _Tally:
@@ -254,14 +277,59 @@ def engine_refutations(decisions: list[Decision]) -> dict:
     return {"blunders": nb, "rows": rows}
 
 
-def style_summary(weights: np.ndarray, prior: np.ndarray) -> list[dict]:
-    """Biggest deviations from the population, as multiplicative odds."""
+def style_summary(weights: np.ndarray, prior: np.ndarray, se: np.ndarray | None = None) -> list[dict]:
+    """Deviations from the population as multiplicative odds, with uncertainty.
+
+    ``reliable`` means the deviation is at least two standard errors from zero;
+    anything else may be noise from too few relevant positions.
+    """
     out = []
     for i, f in enumerate(FEATURE_NAMES):
         dlt = float(weights[i] - prior[i])
-        out.append({"feature": f, "label": FEATURE_LABEL[f], "weight": round(float(weights[i]), 3), "delta": round(dlt, 3), "odds": round(float(np.exp(dlt)), 3)})
-    out.sort(key=lambda r: -abs(r["delta"]))
+        s_ = float(se[i]) if se is not None and np.isfinite(se[i]) else None
+        z = dlt / s_ if s_ else 0.0
+        out.append(
+            {
+                "feature": f,
+                "label": FEATURE_LABEL[f],
+                "weight": round(float(weights[i]), 3),
+                "delta": round(dlt, 3),
+                "odds": round(float(np.exp(dlt)), 3),
+                "se": round(s_, 3) if s_ is not None else None,
+                "z": round(z, 2),
+                "reliable": bool(abs(z) >= 2),
+            }
+        )
+    out.sort(key=lambda r: (-r["reliable"], -abs(r["z"]) if r["se"] else -abs(r["delta"])))
     return out
+
+
+def learned_blind_spots(style: list[dict]) -> list[dict]:
+    """Blind spots as the model learned them: the 'allows a ... tactic' weights.
+
+    Odds > 1 means this player allows that kind of tactic more readily than
+    the average player (after accounting for how much material it costs).
+    """
+    rows = [dict(r, motif=r["feature"].replace("allows_", "")) for r in style if r["feature"].startswith("allows_")]
+    rows.sort(key=lambda r: -r["delta"])
+    return rows
+
+
+def time_pressure_stats(decisions: list[Decision]) -> dict | None:
+    tp = [d for d in decisions if d.pa.time_pressure]
+    normal = [d for d in decisions if not d.pa.time_pressure]
+    if len(tp) < 20 or not normal or not decisions[0].pa.has_engine:
+        return None
+    loss = lambda ds: np.array([float(d.pa.X[d.chosen, IDX["eng_loss"]]) for d in ds])
+    lt, ln = loss(tp), loss(normal)
+    return {
+        "decisions": len(tp),
+        "share": round(len(tp) / len(decisions), 3),
+        "blunder_rate": round(float((lt >= 2).mean()), 3),
+        "blunder_rate_normal": round(float((ln >= 2).mean()), 3),
+        "avg_loss": round(float(lt.mean()), 3),
+        "avg_loss_normal": round(float(ln.mean()), 3),
+    }
 
 
 @dataclass
@@ -279,6 +347,7 @@ class Profile:
     stats: dict
     engine: bool = False
     created: float = field(default_factory=time.time)
+    habits: dict = field(default_factory=dict)  # {"table": {code: [chosen, available]}, "base_rate": r}
 
     def to_json(self) -> dict:
         return {
@@ -296,6 +365,7 @@ class Profile:
             "stats": self.stats,
             "engine": self.engine,
             "created": self.created,
+            "habits": {"table": {str(k): v for k, v in self.habits.get("table", {}).items()}, "base_rate": self.habits.get("base_rate", 0.0)},
         }
 
     @classmethod
@@ -320,6 +390,7 @@ class Profile:
             stats=d.get("stats", {}),
             engine=d.get("engine", False),
             created=d.get("created", 0),
+            habits={"table": {int(k): v for k, v in (d.get("habits") or {}).get("table", {}).items()}, "base_rate": (d.get("habits") or {}).get("base_rate", 0.0)},
         )
 
     def save(self, directory: Path) -> Path:
@@ -334,7 +405,7 @@ class Profile:
 
     def summary(self) -> dict:
         d = self.to_json()
-        for k in ("book", "heldout", "weights", "prior", "feature_names"):
+        for k in ("book", "heldout", "weights", "prior", "feature_names", "habits"):
             d.pop(k)
         d["heldout_games"] = len(self.heldout)
         d["book_positions"] = len(self.book)
@@ -392,6 +463,9 @@ def build_profile(
         if progress:
             progress(gi + 1, len(games))
 
+    table, base_rate = build_habits((d.pa.codes, d.chosen) for d in train)
+    fill_habits(train, table, base_rate, loo=True)
+    fill_habits(test, table, base_rate, loo=False)
     ds_train = model.Dataset.from_positions([(d.pa.X, d.chosen) for d in train])
     ds_test = model.Dataset.from_positions([(d.pa.X, d.chosen) for d in test])
     w = model.fit(ds_train, prior=prior, lam=lam)
@@ -403,7 +477,7 @@ def build_profile(
 
         personal = model.evaluate(ds_test, w)
         population = model.evaluate(ds_test, prior)
-        tmp = Profile(slugify(name), name, w, prior, book, {}, {}, [], {}, [], {}, engine is not None)
+        tmp = Profile(slugify(name), name, w, prior, book, {}, {}, [], {}, [], {}, engine is not None, habits={"table": table, "base_rate": base_rate})
         pred = Predictor(tmp)
         hits1 = hits3 = 0
         for d in test:
@@ -419,6 +493,15 @@ def build_profile(
         evaluation["random"] = {"top1": float(np.mean([1 / len(d.pa.moves) for d in test]))}
 
     all_dec = train + test
+    # Final weights use every game; habits from every game too.
+    table_all, base_all = build_habits((d.pa.codes, d.chosen) for d in all_dec)
+    fill_habits(all_dec, table_all, base_all, loo=True)
+    ds_all = model.Dataset.from_positions([(d.pa.X, d.chosen) for d in all_dec])
+    w_all = model.fit(ds_all, prior=prior, lam=lam)
+    se_all = model.standard_errors(w_all, ds_all, lam)
+    style = style_summary(w_all, prior, se_all)
+    blind = blind_spot_stats(all_dec)
+    blind["learned"] = learned_blind_spots(style)
     stats = {
         "games": len(games),
         "train_games": len(train_games),
@@ -431,18 +514,22 @@ def build_profile(
         stats["avg_loss_pawns"] = round(float(losses.mean()), 3)
         stats["blunder_rate"] = round(float((losses >= 2).mean()), 3)
         stats["engine_match"] = round(float((losses <= 0.1).mean()), 3)
+        tps = time_pressure_stats(all_dec)
+        if tps:
+            stats["time_pressure"] = tps
 
     return Profile(
         id=slugify(name),
         name=name,
-        weights=w,
+        weights=w_all,
         prior=prior,
         book=book,
-        blind_spots=blind_spot_stats(all_dec),
+        blind_spots=blind,
         refutations=engine_refutations(all_dec),
-        style=style_summary(w, prior),
+        style=style,
         evaluation=evaluation,
         heldout=[g.pgn() for g in hold_games],
         stats=stats,
         engine=engine is not None,
+        habits={"table": table_all, "base_rate": base_all},
     )

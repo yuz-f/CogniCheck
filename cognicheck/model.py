@@ -102,6 +102,18 @@ def fit(ds: Dataset, prior: np.ndarray | None = None, lam: float = 0.01, iters: 
     return w
 
 
+def standard_errors(w: np.ndarray, ds: Dataset, lam: float) -> np.ndarray:
+    """Approximate standard errors of the weights (inverse observed information)."""
+    if len(ds) == 0:
+        return np.full(len(w), np.inf)
+    H = _hessian(w, ds, max(lam, 1e-6)) * len(ds)
+    try:
+        cov = np.linalg.inv(H)
+    except np.linalg.LinAlgError:
+        cov = np.linalg.pinv(H)
+    return np.sqrt(np.clip(np.diag(cov), 0, None))
+
+
 def softmax(scores: np.ndarray) -> np.ndarray:
     s = scores - scores.max()
     e = np.exp(s)

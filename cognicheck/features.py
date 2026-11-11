@@ -45,14 +45,35 @@ FEATURES: list[tuple[str, str]] = [
     ("early_queen", "brings the queen out early"),
     ("undo", "undoes its previous move"),
     ("long_diagonal", "uses a long diagonal"),
+    ("near_king", "lands next to the enemy king"),
     ("eng_loss", "objective loss in pawns (engine)"),
     ("eng_best", "plays the engine's top move"),
     ("eng_blunder", "makes an objective blunder (engine)"),
+    ("eng_loss_small", "slightly inaccurate (0.1-0.5 pawns, engine)"),
+    ("eng_loss_mid", "clearly inaccurate (0.5-2 pawns, engine)"),
+    ("eng_rank", "engine rank of the move (0 = best, 1 = worst)"),
+    ("allows_knight", "allows a knight tactic"),
+    ("allows_bishop", "allows a bishop tactic"),
+    ("allows_rook", "allows a rook tactic"),
+    ("allows_queen", "allows a queen tactic"),
+    ("allows_pawn", "allows a pawn tactic"),
+    ("allows_check", "allows a check that wins material"),
+    ("allows_fork", "allows a fork"),
+    ("allows_discovered", "allows a discovered attack"),
+    ("allows_backward", "allows a backward-move tactic"),
+    ("allows_long_range", "allows a long-range tactic"),
+    ("tp_eng_loss", "objective loss, when short of time"),
+    ("tp_hangs", "leaves material en prise, when short of time"),
+    ("tp_capture", "captures, when short of time"),
+    ("habit", "a move this player habitually makes (piece and square)"),
 ]
+ALLOW_MOTIFS = ["knight", "bishop", "rook", "queen", "pawn", "check", "fork", "discovered", "backward", "long_range"]
+TIME_PRESSURE_SECONDS = 20
+HABIT_ALPHA = 2.0
 FEATURE_NAMES = [f for f, _ in FEATURES]
 FEATURE_LABEL = dict(FEATURES)
 IDX = {f: i for i, f in enumerate(FEATURE_NAMES)}
-ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder"}
+ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss"}
 D = len(FEATURE_NAMES)
 
 PIECE_FEATURE = {
@@ -105,6 +126,8 @@ class PositionAnalysis:
     cp: np.ndarray | None = None  # engine score per move (mover pov)
     replies: list[chess.Move | None] = field(default_factory=list)
     phase: str = "middlegame"
+    codes: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int16))  # (piece, to-square) per move
+    time_pressure: bool = False
 
     def index(self, move: chess.Move) -> int:
         return self.moves.index(move)
@@ -114,13 +137,59 @@ class PositionAnalysis:
         return self.cp is not None
 
 
-def analyse_position(board: chess.Board, engine: Engine | None = None) -> PositionAnalysis:
+def move_code(board: chess.Board, move: chess.Move) -> int:
+    """(piece type, destination) in 0..383: the unit of a player's habits."""
+    piece = board.piece_at(move.from_square)
+    return (piece.piece_type - 1) * 64 + move.to_square if piece else 0
+
+
+def habit_values(codes, table: dict, base_rate: float, loo_chosen: int | None = None) -> np.ndarray:
+    """Log-rate of choosing each (piece, square) relative to the player's base rate.
+
+    ``table`` maps code -> [times chosen, times available]. With ``loo_chosen``
+    the current position is itself in the table and is left out (exact
+    leave-one-out), which stops the chosen move from recognising itself.
+    """
+    out = np.zeros(len(codes), dtype=np.float32)
+    if not table or base_rate <= 0:
+        return out
+    for i, c in enumerate(codes):
+        ch, av = table.get(int(c), (0, 0))
+        if loo_chosen is not None:
+            av -= 1
+            if i == loo_chosen:
+                ch -= 1
+        if av <= 0:
+            continue
+        r = (ch + HABIT_ALPHA * base_rate) / (av + HABIT_ALPHA)
+        out[i] = np.clip(np.log(r / base_rate), -3, 3)
+    return out
+
+
+def build_habits(positions) -> tuple[dict, float]:
+    """``positions``: iterable of (codes, chosen index). Returns (table, base rate)."""
+    table: dict[int, list[int]] = {}
+    chosen = avail = 0
+    for codes, c in positions:
+        for i, code in enumerate(codes):
+            row = table.setdefault(int(code), [0, 0])
+            row[1] += 1
+            avail += 1
+            if i == c:
+                row[0] += 1
+                chosen += 1
+    return table, (chosen / avail if avail else 0.0)
+
+
+def analyse_position(board: chess.Board, engine: Engine | None = None, time_left: float | None = None, base_time: float | None = None) -> PositionAnalysis:
     board = board.copy()
     color = board.turn
     moves = list(board.legal_moves)
     n = len(moves)
     X = np.zeros((n, D), dtype=np.float32)
     ph = phase(board)
+    tp = time_left is not None and (time_left < TIME_PRESSURE_SECONDS or (bool(base_time) and time_left < 0.1 * base_time))
+    codes = np.array([move_code(board, m) for m in moves], dtype=np.int16)
 
     last = board.move_stack[-1] if board.move_stack else None
     my_last = board.move_stack[-2] if len(board.move_stack) >= 2 else None
@@ -138,6 +207,8 @@ def analyse_position(board: chess.Board, engine: Engine | None = None) -> Positi
         cp = np.array([engine_scores[m.uci()].cp for m in moves], dtype=np.float32)
         replies = [engine_scores[m.uci()].reply for m in moves]
         best = cp.max()
+        rank = np.empty(n, dtype=np.float32)
+        rank[np.argsort(-cp, kind="stable")] = np.arange(n)
 
     after_gain = np.zeros(n, dtype=np.float32)
     after_capture: list[chess.Move | None] = [None] * n
@@ -199,7 +270,11 @@ def analyse_position(board: chess.Board, engine: Engine | None = None) -> Positi
             d0 = chess.square_distance(m.from_square, enemy_king)
             d1 = chess.square_distance(m.to_square, enemy_king)
             row[IDX["king_approach"]] = (d0 - d1) / 7.0
-            if pt == chess.PAWN and abs(chess.square_file(m.from_square) - chess.square_file(enemy_king)) <= 1 and dy > 0:
+            if pt != chess.PAWN and d1 <= 2:
+                row[IDX["near_king"]] = 1
+            king_file = chess.square_file(enemy_king)
+            # A pawn storm aims at a king that has left the centre (or is already close).
+            if pt == chess.PAWN and dy > 0 and rel_rank >= 4 and abs(chess.square_file(m.to_square) - king_file) <= 1 and (king_file not in (3, 4) or d1 <= 2):
                 row[IDX["pawn_storm"]] = 1
 
         if ph == "opening":
@@ -216,10 +291,17 @@ def analyse_position(board: chess.Board, engine: Engine | None = None) -> Positi
             og, oc = 0, None
         else:
             og, oc = tactics.max_opponent_gain(board)
+            if og >= 1 and oc is not None:
+                for t in tactics.motifs(board, oc):
+                    if t in ALLOW_MOTIFS:
+                        row[IDX["allows_" + t]] = 1
         board.pop()
         after_gain[i] = og
         after_capture[i] = oc
         row[IDX["hangs"]] = min(og, 9) / 3.0
+        if tp:
+            row[IDX["tp_hangs"]] = row[IDX["hangs"]]
+            row[IDX["tp_capture"]] = row[IDX["capture"]]
         if threat_gain >= 1:
             if og < threat_gain:
                 row[IDX["saves"]] = (threat_gain - og) / 3.0
@@ -231,6 +313,11 @@ def analyse_position(board: chess.Board, engine: Engine | None = None) -> Positi
             row[IDX["eng_loss"]] = min(loss, 6.0)
             row[IDX["eng_best"]] = 1.0 if loss <= 0.1 else 0.0
             row[IDX["eng_blunder"]] = 1.0 if loss >= 2.0 else 0.0
+            row[IDX["eng_loss_small"]] = 1.0 if 0.1 < loss <= 0.5 else 0.0
+            row[IDX["eng_loss_mid"]] = 1.0 if 0.5 < loss < 2.0 else 0.0
+            row[IDX["eng_rank"]] = rank[i] / (n - 1) if n > 1 else 0.0
+            if tp:
+                row[IDX["tp_eng_loss"]] = row[IDX["eng_loss"]]
 
     return PositionAnalysis(
         board=board,
@@ -247,6 +334,8 @@ def analyse_position(board: chess.Board, engine: Engine | None = None) -> Positi
         cp=cp,
         replies=replies,
         phase=ph,
+        codes=codes,
+        time_pressure=bool(tp),
     )
 
 

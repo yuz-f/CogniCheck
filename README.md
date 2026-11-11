@@ -51,15 +51,23 @@ games ──► every decision the player faced ──► features of every lega
                                                 attention / plans / blind spots
 ```
 
-1. **Move features** (`cognicheck/features.py`). Every legal move is described by ~33
+1. **Move features** (`cognicheck/features.py`). Every legal move is described by ~50
    interpretable features: piece moved, capture & exchange value (SEE), check, forward /
    backward, distance, centralisation, *leaves material en prise*, *rescues a threatened
    piece*, *ignores an existing threat*, recapture, reacts to the opponent's last move,
-   approaches the enemy king, pawn storm, development, early queen, and — if Stockfish is
-   available — objective loss in pawns / top-move / blunder.
+   lands next to the enemy king, pawn storm, development, early queen; with Stockfish,
+   objective loss in pawns in several bands plus the move's engine rank; **motif-specific
+   vulnerability** ("allows a knight / bishop / fork / discovered / backward / long-range
+   tactic"), so the model can *learn* a player's blind spots rather than only count them;
+   **time-pressure interactions** (loss, hanging material and captures when under 20 s
+   or 10 % of the clock, from the `%clk` tags in Lichess PGNs); and a **habit** feature:
+   how often this player chooses this (piece, square) when it is available, relative to
+   their base rate, computed leave-one-out so a move cannot recognise itself.
 
 2. **Personal model** (`cognicheck/model.py`). A conditional logit: `P(m) = softmax(w·x_m)`
-   over the legal moves, fit by Newton's method. The weights are pulled towards a
+   over the legal moves, fit by Newton's method. The inverse Hessian gives a standard
+   error per weight, so every style trait and learned blind spot is shown with ± and
+   flagged as *reliable* only when it is at least two standard errors from zero. The weights are pulled towards a
    **population prior** (`data/population.json`) with an L2 penalty, so a player with
    few games looks average and their quirks emerge as games accumulate. The deviation
    `w − w_prior` *is* the player's style. The engine is just one feature: a strong
@@ -81,8 +89,11 @@ games ──► every decision the player faced ──► features of every lega
 
 5. **Perspective** (`cognicheck/predictor.py`). For the current position the probability
    that the player reacts to each threat is the model's probability mass on moves that
-   neutralise it — so it's grounded in the same personal model, and combined with
-   the blind-spot history for the explanation.
+   neutralise it, so it is grounded in the same personal model. Explanations decompose
+   `log P(move)` feature by feature as `w_j · (x_j − E[x_j])`, the evidence that pulled
+   the player towards this move relative to what the model expected. Blind-spot notes
+   use the learned "allows a … tactic" weights when they are reliable, and the counted
+   miss rates otherwise.
 
 ## Validation with planted blind spots
 

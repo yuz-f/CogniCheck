@@ -6,7 +6,15 @@ import numpy as np
 
 from . import tactics
 from .engine import Engine
-from .features import FEATURE_LABEL, FEATURE_NAMES, IDX, PositionAnalysis, analyse_position
+from .features import ENGINE_FEATURES, FEATURE_LABEL, FEATURE_NAMES, IDX, PositionAnalysis, analyse_position, habit_values
+
+# Collinear feature families are explained as one line.
+REASON_GROUPS = {
+    "engine": (set(ENGINE_FEATURES), "objectively sound (engine)", "objectively weak (engine)"),
+    "hangs": ({"hangs", "tp_hangs"}, "leaves material en prise", "leaves material en prise"),
+    "capture": ({"capture", "tp_capture"}, "captures", "captures"),
+}
+_GROUP_OF = {f: g for g, (fs, _, _) in REASON_GROUPS.items() for f in fs}
 from .model import softmax
 
 BOOK_ALPHA = 2.0  # pseudo-count of the model inside the opening book
@@ -24,18 +32,24 @@ PLANS = [
 PLAN_LABEL = dict(PLANS)
 
 
-def _plan_of(x: np.ndarray) -> str:
+def _plan_of(x: np.ndarray, phase: str = "middlegame", threat_gain: int = 0) -> str:
+    """Read an intention off a move's features. Order matters: the most
+    specific reading wins, and in the opening development beats 'attack'.
+    Parrying a mere pawn threat with a developing move reads as development."""
     if x[IDX["mate"]]:
         return "mate"
-    if x[IDX["saves"]] > 0:
+    develops = x[IDX["develops"]] or x[IDX["castle"]]
+    if x[IDX["saves"]] > 0 and (threat_gain >= 2 or not develops):
         return "defend"
     if x[IDX["capture_gain"]] > 0:
         return "grab"
     if x[IDX["equal_trade"]]:
         return "trade"
-    if x[IDX["check"]] or x[IDX["pawn_storm"]] or x[IDX["king_approach"]] > 0.15:
+    if phase == "opening" and develops:
+        return "develop"
+    if x[IDX["check"]] or x[IDX["pawn_storm"]] or x[IDX["near_king"]]:
         return "attack"
-    if x[IDX["develops"]] or x[IDX["castle"]]:
+    if develops:
         return "develop"
     if x[IDX["pawn_move"]]:
         return "pawns"
@@ -50,6 +64,9 @@ class Predictor:
         self.prior = np.asarray(profile.prior, dtype=np.float64)
         self.motif_index: dict[str, float] = (profile.blind_spots or {}).get("motif_index", {})
         self._rows = {(r["kind"], r["motif"]): r for r in (profile.blind_spots or {}).get("rows", [])}
+        # Blind spots the model itself learned ('allows a ... tactic' weights), odds vs. the average player.
+        self.learned: dict[str, float] = {r["motif"]: r["odds"] for r in (profile.blind_spots or {}).get("learned", []) if r.get("reliable")}
+        self.habits = getattr(profile, "habits", None) or {}
 
     # ---------------------------------------------------------------- core
     def model_distribution(self, pa: PositionAnalysis) -> np.ndarray:
@@ -70,37 +87,53 @@ class Predictor:
         return p
 
     def analyse(self, board: chess.Board) -> PositionAnalysis:
-        return analyse_position(board, self.engine)
+        pa = analyse_position(board, self.engine)
+        table = self.habits.get("table")
+        if table:
+            pa.X[:, IDX["habit"]] = habit_values(pa.codes, table, self.habits.get("base_rate", 0.0))
+        return pa
 
     # ------------------------------------------------------------- explain
     def reasons(self, pa: PositionAnalysis, i: int, k: int = 3) -> list[dict]:
+        """Why this move rather than what the model expected.
+
+        log P(i) decomposes along features as w_j * (x_ij - E[x_j]) where E is
+        the model's own expectation over the legal moves, so each term is the
+        evidence that pulled the player towards move i, feature by feature.
+        """
         X = pa.X.astype(np.float64)
-        centred = X[i] - X.mean(axis=0)
+        probs = self.model_distribution(pa)
+        centred = X[i] - probs @ X
         total = self.w * centred
         personal = (self.w - self.prior) * centred
+        # Sum collinear families; keep the sign of the move's own feature value.
+        items: dict[str, list] = {}
+        for j, f in enumerate(FEATURE_NAMES):
+            g = _GROUP_OF.get(f, f)
+            it = items.setdefault(g, [0.0, 0.0, 0.0])
+            it[0] += float(total[j])
+            it[1] += float(personal[j])
+            it[2] += float(centred[j]) * (1 if f not in ENGINE_FEATURES or f in ("eng_best",) else -1 if f in ("eng_loss", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss") else 1)
         out = []
-        for j in np.argsort(-np.abs(total))[:k]:
-            if abs(total[j]) < 0.15:
+        for g, (eff, pers, c) in sorted(items.items(), key=lambda kv: -abs(kv[1][0]))[:k]:
+            if abs(eff) < 0.15:
                 continue
-            f = FEATURE_NAMES[j]
-            label = FEATURE_LABEL[f]
-            if f == "eng_loss":
-                label = "objectively sound (engine)" if total[j] > 0 else "objectively weak (engine)"
-            out.append(
-                {
-                    "feature": f,
-                    "label": label,
-                    "effect": round(float(total[j]), 2),
-                    "personal": round(float(personal[j]), 2),
-                }
-            )
+            if g in REASON_GROUPS:
+                _, pos, neg = REASON_GROUPS[g]
+                label, has = (pos if eff > 0 else neg), True
+                if g != "engine":
+                    has = c > 0
+            else:
+                label, has = FEATURE_LABEL[g], c > 0
+            out.append({"feature": g, "label": label, "has": bool(has), "effect": round(eff, 2), "personal": round(pers, 2)})
         return out
 
     def motif_note(self, tags: set[str]) -> tuple[float, str | None]:
-        """Worst blind-spot index among the motifs, and its label."""
+        """Worst blind spot among the motifs: the model's learned odds when
+        reliable, otherwise the counted miss-rate index. Returns (index, label)."""
         best, label = 1.0, None
         for t in tags:
-            idx = self.motif_index.get(t)
+            idx = self.learned.get(t) or self.motif_index.get(t)
             if idx and idx > best:
                 best, label = idx, tactics.MOTIF_LABEL.get(t, t)
         return best, label
@@ -198,7 +231,7 @@ class Predictor:
 
         plans: dict[str, float] = {}
         for i in range(len(pa.moves)):
-            k = _plan_of(pa.X[i])
+            k = _plan_of(pa.X[i], pa.phase, pa.threat_gain)
             plans[k] = plans.get(k, 0.0) + float(probs[i])
         plan_rows = [{"plan": k, "label": PLAN_LABEL[k], "p": round(v, 3)} for k, v in sorted(plans.items(), key=lambda kv: -kv[1]) if v >= 0.03]
 

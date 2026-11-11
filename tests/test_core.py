@@ -182,3 +182,32 @@ def test_pgn_rating_for_added_players():
     pgn = SAMPLE_PGN.replace('[White "Alice"]', '[White "Alice"]\n[WhiteElo "1500"]').replace('[Black "Alice"]', '[Black "Alice"]\n[BlackElo "1600"]')
     assert cohort._pgn_rating(pgn, "alice") in (1500, 1550, 1600)
     assert cohort._pgn_rating(SAMPLE_PGN, "alice") == 0
+
+
+def test_habit_feature_leave_one_out():
+    from cognicheck.features import build_habits, habit_values
+
+    # Three positions; code 7 is chosen whenever available, code 9 never.
+    positions = [(np.array([7, 9, 11]), 0), (np.array([7, 9]), 0), (np.array([9, 11]), 1)]
+    table, base = build_habits(positions)
+    assert table[7] == [2, 2] and table[9] == [0, 3]
+    full = habit_values(np.array([7, 9, 11]), table, base)
+    assert full[0] > 0 > full[1]
+    # Leave-one-out: in a position where 7 was chosen, its own choice must not count.
+    loo = habit_values(np.array([7, 9, 11]), table, base, loo_chosen=0)
+    assert loo[0] < full[0]
+    assert np.all(habit_values(np.array([7, 9]), {}, 0.0) == 0)
+
+
+def test_plans_in_the_opening_are_not_attacks():
+    from cognicheck.predictor import _plan_of
+
+    b = chess.Board()
+    for u in ("e2e4", "e7e5", "g1f3", "b8c6"):
+        b.push_uci(u)
+    pa = analyse_position(b)
+    plans = {_plan_of(pa.X[i], pa.phase) for i in range(len(pa.moves))}
+    assert "develop" in plans
+    i = pa.index(chess.Move.from_uci("f1c4"))
+    assert _plan_of(pa.X[i], pa.phase) == "develop"
+    assert pa.X[pa.index(chess.Move.from_uci("d2d4")), IDX["pawn_storm"]] == 0
