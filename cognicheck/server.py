@@ -6,6 +6,7 @@ import secrets
 import threading
 import traceback
 from pathlib import Path
+from typing import List, Optional
 
 import chess
 import chess.pgn
@@ -59,43 +60,43 @@ def predictor_for(pid: str) -> Predictor:
 
 # ------------------------------------------------------------------ models
 class BuildRequest(BaseModel):
-    pgn: str | None = None
-    player: str | None = None
-    lichess: str | None = None
-    chesscom: str | None = None
+    pgn: Optional[str] = None
+    player: Optional[str] = None
+    lichess: Optional[str] = None
+    chesscom: Optional[str] = None
     max_games: int = 150
-    rating: int | None = None
+    rating: Optional[int] = None
     include_in_map: bool = True
 
 
 class PredictRequest(BaseModel):
     player_id: str
-    fen: str | None = None
-    moves: list[str] = []
+    fen: Optional[str] = None
+    moves: List[str] = []
     top_k: int = 5
 
 
 class GameRequest(BaseModel):
     player_id: str
-    game_index: int | None = None
-    pgn: str | None = None
+    game_index: Optional[int] = None
+    pgn: Optional[str] = None
 
 
 class GuessRequest(BaseModel):
-    uci: str | None = None
+    uci: Optional[str] = None
 
 
 class LiveRequest(BaseModel):
-    source: str | None = None  # Lichess game URL / id / username
-    player_id: str | None = None  # whose profile to use (default: match by name)
-    color: str | None = None  # "white"/"black" if the profile name is not in the game
-    simulate_game: int | None = None  # replay a held-out game of player_id instead
+    source: Optional[str] = None  # Lichess game URL / id / username
+    player_id: Optional[str] = None  # whose profile to use (default: match by name)
+    color: Optional[str] = None  # "white"/"black" if the profile name is not in the game
+    simulate_game: Optional[int] = None  # replay a held-out game of player_id instead
     delay: float = 4.0
 
 
 class PositionRequest(BaseModel):
-    fen: str | None = None
-    moves: list[str] = []
+    fen: Optional[str] = None
+    moves: List[str] = []
 
 
 # --------------------------------------------------------------- endpoints
