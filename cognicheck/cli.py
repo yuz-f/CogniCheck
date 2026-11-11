@@ -139,6 +139,21 @@ def print_profile(prof):
             print(f"  {r['label']:40s} lift {r['lift']:.2f}")
 
 
+def cmd_cohort(args):
+    from . import cohort
+
+    if args.stage in ("select", "all"):
+        cohort.select_players(per_bin=args.per_bin, min_games=args.min_games)
+    if args.stage in ("fetch", "all"):
+        cohort.fetch_games(args.games)
+    if args.stage in ("analyse", "all"):
+        cohort.analyse_all(workers=args.workers, depth=args.depth)
+    if args.stage in ("fit", "all"):
+        cohort.fit_all()
+    if args.stage in ("pca", "all"):
+        cohort.print_report(cohort.run_pca())
+
+
 def cmd_serve(args):
     import uvicorn
 
@@ -176,6 +191,15 @@ def main(argv=None):
     li.add_argument("--no-engine", action="store_true")
     li.add_argument("--depth", type=int, default=6)
     li.set_defaults(func=cmd_lichess)
+
+    co = sub.add_parser("cohort", help="profile many real Lichess players and run the PCA")
+    co.add_argument("stage", choices=["select", "fetch", "analyse", "fit", "pca", "all"])
+    co.add_argument("--per-bin", type=int, default=9, help="players per rating band")
+    co.add_argument("--min-games", type=int, default=400, help="minimum rated blitz games on Lichess")
+    co.add_argument("--games", type=int, default=60, help="games to download per player")
+    co.add_argument("--workers", type=int, default=4)
+    co.add_argument("--depth", type=int, default=5)
+    co.set_defaults(func=cmd_cohort)
 
     s = sub.add_parser("serve", help="run the web app")
     s.add_argument("--host", default="127.0.0.1")

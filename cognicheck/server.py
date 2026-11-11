@@ -32,8 +32,10 @@ _lock = threading.Lock()
 
 def profiles() -> dict[str, Profile]:
     with _lock:
-        if PROFILES.exists():
-            for p in PROFILES.glob("*.json"):
+        from .cohort import PROFILES_REAL
+
+        for p in [*PROFILES.glob("*.json"), *PROFILES_REAL.glob("*.json")]:
+            if True:
                 pid = p.stem
                 mtime = p.stat().st_mtime
                 cur = _profiles.get(pid)
@@ -117,6 +119,17 @@ def list_players():
             }
         )
     return sorted(out, key=lambda r: r["name"].lower())
+
+
+@app.get("/api/map")
+def player_map():
+    from .cohort import PCA_OUT
+
+    if not PCA_OUT.exists():
+        raise HTTPException(404, "no cohort PCA yet - run: python -m cognicheck cohort all")
+    import json
+
+    return json.loads(PCA_OUT.read_text())
 
 
 @app.get("/api/players/{pid}")

@@ -160,3 +160,17 @@ def test_game_session_flow(alice_profile):
     while not s.finished:
         s.guess(None)
     assert s.state()["finished"]
+
+
+def test_cohort_helpers():
+    from cognicheck import cohort
+
+    rng = np.random.default_rng(0)
+    Z = np.vstack([rng.normal(0, 0.3, (20, 2)) + c for c in ([0, 0], [4, 4], [0, 4])])
+    lab, C, _ = cohort._kmeans(Z, 3)
+    assert len(set(lab)) == 3
+    assert cohort._silhouette(Z, lab) > 0.7
+    w = np.zeros(len(FEATURE_NAMES))
+    v = cohort.cognition_vector(w, w, {"motif_index": {"knight": 2.0}}, {"engine_match": 0.4})
+    assert v["blind:knight"] > 0 and v["blind:bishop"] == 0 and v["skill:engine_match"] == 0.4
+    assert not any(k.startswith("style:eng_") for k in v)

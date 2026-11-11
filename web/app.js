@@ -115,6 +115,7 @@ function showView(name) {
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   if (name === "analyse") analyse.refresh();
   if (name === "live") live.loadSimGames();
+  if (name === "map") map.load();
 }
 document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
 
@@ -463,6 +464,74 @@ const live = {
         <div>You: ${l.guess ? `${esc(l.guess)} <span class="${l.user_hit ? "ok" : "no"}">${l.user_hit ? "✓" : "✗"}</span>` : `<span class="muted">no guess</span>`}</div>
         ${!pend && l.perspective ? `<ul class="notes">${l.perspective.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}`;
     } else lastEl.classList.add("hidden");
+  },
+};
+
+// --------------------------------------------------------------------- map
+const TYPE_COLORS = ["#2f6fde", "#e07b18", "#1f8a4c", "#a43fb5", "#c2412d", "#5b6b7a"];
+const map = {
+  data: null, sel: null,
+  async load() {
+    if (this.data) return this.render();
+    try { this.data = await api("/api/map"); }
+    catch (e) { $("#map-plot").innerHTML = `<p class="muted">${esc(e.message)}</p>`; return; }
+    const opts = this.data.components.map((c) => `<option value="${c.index - 1}">PC${c.index} · ${pct(c.explained)} var · reliability ${c.reliability.toFixed(2)}</option>`).join("");
+    $("#map-x").innerHTML = opts; $("#map-y").innerHTML = opts; $("#map-y").value = "1";
+    $("#map-x").onchange = $("#map-y").onchange = () => this.render();
+    this.render();
+    this.side();
+  },
+  axisName(c) {
+    const l = c.loadings.slice(0, 3);
+    const pos = l.filter((x) => x.loading > 0).map((x) => x.label), neg = l.filter((x) => x.loading < 0).map((x) => x.label);
+    return { pos: pos.join(", ") || "-", neg: neg.join(", ") || "-" };
+  },
+  render() {
+    const d = this.data; if (!d) return;
+    const xi = +$("#map-x").value, yi = +$("#map-y").value;
+    const W = 640, H = 520, pad = 46;
+    const xs = d.players.map((p) => p.pc[xi]), ys = d.players.map((p) => p.pc[yi]);
+    const ext = (a) => { const m = Math.max(...a.map(Math.abs)) * 1.1 || 1; return [-m, m]; };
+    const [x0, x1] = ext(xs), [y0, y1] = ext(ys);
+    const sx = (v) => pad + ((v - x0) / (x1 - x0)) * (W - 2 * pad), sy = (v) => H - pad - ((v - y0) / (y1 - y0)) * (H - 2 * pad);
+    const cx = d.components[xi], cy = d.components[yi];
+    const ax = this.axisName(cx), ay = this.axisName(cy);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Player map">
+      <line class="axis" x1="${pad}" y1="${sy(0)}" x2="${W - pad}" y2="${sy(0)}"/><line class="axis" x1="${sx(0)}" y1="${pad}" x2="${sx(0)}" y2="${H - pad}"/>
+      <text x="${W - pad}" y="${sy(0) - 6}" text-anchor="end">→ ${esc(ax.pos)}</text>
+      <text x="${pad}" y="${sy(0) - 6}">← ${esc(ax.neg)}</text>
+      <text x="${sx(0) + 6}" y="${pad - 8}">↑ ${esc(ay.pos)}</text>
+      <text x="${sx(0) + 6}" y="${H - pad + 18}">↓ ${esc(ay.neg)}</text>`;
+    d.players.forEach((p, i) => {
+      const r = 4 + ((p.rating - 800) / 2200) * 5;
+      svg += `<circle class="dot ${this.sel === p.id ? "sel" : ""}" data-i="${i}" cx="${sx(p.pc[xi]).toFixed(1)}" cy="${sy(p.pc[yi]).toFixed(1)}" r="${Math.max(3, r).toFixed(1)}" fill="${TYPE_COLORS[p.type % TYPE_COLORS.length]}" opacity="0.85"><title>${esc(p.name)} (${p.rating})</title></circle>`;
+    });
+    svg += `</svg><p class="muted" style="margin:4px 8px">Each dot is a real Lichess blitz player; dot size = rating, colour = player type. Rating has been regressed out of the axes. Click a dot.</p>`;
+    $("#map-plot").innerHTML = svg;
+    $("#map-plot").querySelectorAll(".dot").forEach((el) => el.addEventListener("click", () => this.pick(d.players[+el.dataset.i])));
+    $("#map-types").innerHTML = `<div class="card"><h3>Player types (k-means, k=${d.k}, silhouette ${d.silhouette})</h3>${d.types.map((t) => `<div style="margin:6px 0"><span class="swatch" style="background:${TYPE_COLORS[t.type % TYPE_COLORS.length]}"></span><b>Type ${t.type + 1}</b> · ${t.size} players · mean rating ${t.mean_rating}<div class="why">${t.traits.slice(0, 4).map((x) => `${x.z > 0 ? "more" : "less"} ${esc(x.label)} (${x.z > 0 ? "+" : ""}${x.z})`).join(" · ")}</div></div>`).join("")}</div>`;
+  },
+  side() {
+    const d = this.data;
+    const pr = d.prediction;
+    $("#map-side").innerHTML = `<div class="card"><h3>Is this real?</h3>
+      <p class="muted">Each player was also profiled twice, from two disjoint halves of their games. If an axis is a stable trait, both halves land in the same place (split-half r). Shuffled players give |r| ≤ ${d.null_split_half_r_95} (95%).</p>
+      ${d.components.map((c) => barRow(`PC${c.index}`, Math.max(0, c.split_half_r), 1, `r ${c.split_half_r.toFixed(2)}`, c.split_half_r < 0.4 ? "neg" : "")).join("")}
+      <h4>Prediction on held-out games (${pr.n} players)</h4>
+      ${barRow("Personal model", pr.mean_top1.personal, 1, pct(pr.mean_top1.personal))}
+      ${barRow("Average-player model", pr.mean_top1.population, 1, pct(pr.mean_top1.population))}
+      ${barRow("Stockfish top move", pr.mean_top1.engine_top_move, 1, pct(pr.mean_top1.engine_top_move))}
+      <p class="muted">Personal model better log-loss for ${pr.players_with_better_logloss}/${pr.n} players.</p></div>
+      <div class="card" id="map-axes"><h3>What the axes mean</h3>${d.components.map((c) => `<h4>PC${c.index} <small>${pct(c.explained)} of variance</small></h4>${c.loadings.slice(0, 5).map((l) => divRow(esc(l.label), l.loading * 4, l.loading.toFixed(2))).join("")}`).join("")}</div>
+      <div class="card" id="map-player"><p class="muted">Click a player on the map.</p></div>`;
+  },
+  pick(p) {
+    this.sel = p.id; this.render();
+    const xi = +$("#map-x").value, yi = +$("#map-y").value;
+    $("#map-player").innerHTML = `<h3>${esc(p.name)} <small>${p.rating}</small></h3>
+      <p>Type ${p.type + 1}. Position from half A of their games: (${p.pcA[xi].toFixed(1)}, ${p.pcA[yi].toFixed(1)}), half B: (${p.pcB[xi].toFixed(1)}, ${p.pcB[yi].toFixed(1)}).</p>
+      <button class="primary" id="map-open">Open profile</button>`;
+    $("#map-open").addEventListener("click", async () => { showView("players"); await selectPlayer(p.id); });
   },
 };
 

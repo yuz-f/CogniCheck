@@ -13,6 +13,7 @@
       <button data-view="players" class="active">Players</button>
       <button data-view="play">Play</button>
       <button data-view="live">Live</button>
+      <button data-view="map">Map</button>
       <button data-view="analyse">Analyse</button>
     </nav>
     <div id="engine-badge" class="badge"></div>
@@ -112,6 +113,21 @@
           <div id="lv-pred" class="card hidden"></div>
           <div id="lv-last" class="card hidden"></div>
         </div>
+      </div>
+    </section>
+
+    <!-- MAP --------------------------------------------------------------->
+    <section id="view-map" class="view">
+      <div class="play-layout map-layout">
+        <div>
+          <div class="controls">
+            <label>X axis <select id="map-x"></select></label>
+            <label>Y axis <select id="map-y"></select></label>
+          </div>
+          <div id="map-plot" class="card map-plot"></div>
+          <div id="map-types"></div>
+        </div>
+        <div class="side-col" id="map-side"></div>
       </div>
     </section>
 
