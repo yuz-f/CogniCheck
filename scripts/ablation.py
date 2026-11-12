@@ -23,6 +23,7 @@ FAMILIES = {
     "no working memory": ["allows_simple", "allows_complex", "load_eng_loss", "load_hangs", "focus_recent", "focus_stale"],
     "no traps (greedy / threat / hangs split)": ["greedy_gain", "creates_threat", "threat_hangs", "hangs_moved", "hangs_other"],
     "no game state (behind / ahead / tilt)": ["behind_eng_loss", "ahead_eng_loss", "tilt_eng_loss"],
+    "no refutation motifs (ref_*)": [f for f in FEATURE_NAMES if f.startswith("ref_")],
     "no rating-band prior": [],  # handled below: evaluate against the global prior instead
 }
 players = [p for p in json.loads(cohort.PLAYERS.read_text()) if (cohort.ANALYSIS / f"{p['id']}.npz").exists()]

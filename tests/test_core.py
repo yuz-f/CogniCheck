@@ -339,3 +339,22 @@ def test_trap_and_game_state_features():
     pa3 = analyse_position(d)
     assert pa3.X[0, IDX["just_lost"]] == 1 and pa3.X[0, IDX["behind"]] == 1 and pa3.X[0, IDX["ahead"]] == 0
     assert pa3.X[:, IDX["behind"]].min() == 1  # constant within the position
+
+
+def test_refutation_motif_features_with_engine():
+    from cognicheck.engine import find_stockfish, Engine
+
+    if not find_stockfish():
+        pytest.skip("no stockfish")
+    eng = Engine(depth=6)
+    try:
+        # Scholar's mate threat: ...Nf6?? loses to Qxf7#, a capture + check refutation.
+        b = chess.Board("r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 3 3")
+        pa = analyse_position(b, eng)
+        i = pa.index(chess.Move.from_uci("g8f6"))
+        assert pa.X[i, IDX["eng_loss"]] >= 1
+        assert pa.X[i, IDX["ref_capture"]] == 1 and pa.X[i, IDX["ref_check"]] == 1
+        j = pa.index(chess.Move.from_uci("g7g6"))  # a sound defence: no refutation
+        assert pa.X[j, IDX["ref_capture"]] == 0
+    finally:
+        eng.close()

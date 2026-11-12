@@ -339,6 +339,8 @@ def learned_blind_spots(style: list[dict]) -> list[dict]:
     the average player (after accounting for how much material it costs).
     """
     rows = [dict(r, motif=r["feature"].replace("allows_", "")) for r in style if r["feature"].startswith("allows_")]
+    # Refutation motifs the player fails to see (needs engine columns; zero weight otherwise).
+    rows += [dict(r, motif="ref_" + r["feature"].replace("ref_", ""), label=r["label"].replace("loses to", "overlooks refutations by")) for r in style if r["feature"].startswith("ref_") and r["delta"] != 0]
     rows.sort(key=lambda r: -r["delta"])
     return rows
 

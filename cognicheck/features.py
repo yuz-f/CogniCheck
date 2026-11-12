@@ -101,6 +101,15 @@ FEATURES: list[tuple[str, str]] = [
     ("behind_eng_loss", "objective loss, when behind in material"),
     ("ahead_eng_loss", "objective loss, when ahead in material"),
     ("tilt_eng_loss", "objective loss, right after losing material"),
+    ("ref_quiet", "loses to a quiet (non-capturing) refutation"),
+    ("ref_check", "loses to a check"),
+    ("ref_capture", "loses to a capture"),
+    ("ref_knight", "loses to a knight move"),
+    ("ref_fork", "loses to a fork"),
+    ("ref_discovered", "loses to a discovered attack"),
+    ("ref_backward", "loses to a backward move"),
+    ("ref_long_range", "loses to a long-range move"),
+    ("ref_pawn", "loses to a pawn move"),
 ]
 NEURAL_FEATURES = {"maia_logp", "maia_top"}
 NEURAL_FROM_PLY = 10
@@ -117,7 +126,11 @@ PRODUCT_FEATURES = {
     "ahead_eng_loss": ("ahead", "eng_loss"),
     "tilt_eng_loss": ("just_lost", "eng_loss"),
 }
-POSITION_FEATURES = {"load", "behind", "ahead", "just_lost"}  # constant within a position: only matter via products
+POSITION_FEATURES = {"load", "behind", "ahead", "just_lost"}
+# Motifs of the engine's refutation for moves that lose >= REF_LOSS pawns: what the
+# player would have had to see. Needs the engine (Stockfish's reply per move).
+REF_MOTIFS = ["quiet", "check", "capture", "knight", "fork", "discovered", "backward", "long_range", "pawn"]
+REF_LOSS = 1.0  # constant within a position: only matter via products
 MATERIAL_EDGE = 2  # pawns
 MAX_CONTACTS = 16  # attacker-victim pairs; normalises the "load" of a position
 FOCUS_RECENT = 3  # pieces a player keeps in working memory (Cowan's 3-5)
@@ -141,7 +154,7 @@ HABIT_ALPHA = 2.0
 FEATURE_NAMES = [f for f, _ in FEATURES]
 FEATURE_LABEL = dict(FEATURES)
 IDX = {f: i for i, f in enumerate(FEATURE_NAMES)}
-ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "quick_eng_loss", "long_eng_loss", "load_eng_loss", "behind_eng_loss", "ahead_eng_loss", "tilt_eng_loss"}
+ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "quick_eng_loss", "long_eng_loss", "load_eng_loss", "behind_eng_loss", "ahead_eng_loss", "tilt_eng_loss"} | {"ref_" + m for m in REF_MOTIFS}
 D = len(FEATURE_NAMES)
 
 PIECE_FEATURE = {
@@ -634,6 +647,15 @@ def analyse_position(
             row[IDX["behind_eng_loss"]] = float(behind) * row[IDX["eng_loss"]]
             row[IDX["ahead_eng_loss"]] = float(ahead) * row[IDX["eng_loss"]]
             row[IDX["tilt_eng_loss"]] = float(just_lost) * row[IDX["eng_loss"]]
+            if loss >= REF_LOSS and replies[i] is not None:
+                board.push(m)
+                try:
+                    if replies[i] in board.legal_moves:
+                        for t in tactics.motifs(board, replies[i]):
+                            if t in REF_MOTIFS:
+                                row[IDX["ref_" + t]] = 1
+                finally:
+                    board.pop()
             if tp:
                 row[IDX["tp_eng_loss"]] = row[IDX["eng_loss"]]
 
