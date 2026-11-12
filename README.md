@@ -182,7 +182,7 @@ improve prediction for players like Kai.
 ## Cognition map of real players (PCA)
 
 `python -m cognicheck cohort all` profiles a cohort of real Lichess players and maps
-them. Its stages are `select`, `fetch`, `analyse`, `fit` and `pca`, and each can be run alone.
+them. Its stages are `select`, `fetch`, `analyse`, `memory` (engine-free working-memory columns), `maia`, `fit` and `pca`, and each can be run alone.
 
 The study run behind the numbers below:
 - **Cohort:** 81 Lichess blitz players rated 812–2929. 72 were sampled evenly across
@@ -305,11 +305,51 @@ On the synthetic personas, the model-learned blind spots rank the planted one
 first for Kai (knight ×1.21, reliable) and Sasha (backward moves ×1.66, reliable);
 for Tomas the long-range weight is first but not beyond noise.
 
+### Working memory (v4)
+
+Chess cognition research puts a player's working memory at roughly 3–5 "chunks". We
+test that in three ways, all computed from the games themselves (`cognicheck/capacity.py`):
+
+| Measure | What is counted | Cohort (82 players, median and 10–90 % range) | r with rating |
+|---|---|---|---|
+| Tactic complexity | walk-in rate for tactics that need 4+ pieces held in mind vs. plain 2-piece ones | 0.81× (0.69–1.00) | −0.62 |
+| Overload | blunder rate in crowded positions (many pieces in contact) vs. quiet ones | 1.94× (1.34–2.70) | −0.48 |
+| Focus span | share of moves made with one of the 3 most recently moved pieces, vs. chance | 1.06× (1.00–1.16) | −0.54 |
+| | share of moves returning to a piece untouched for 8+ moves, vs. chance | 0.93× (0.84–0.99) | +0.51 |
+
+**What this says**
+
+- **Everyone overloads.** Across the cohort the blunder rate doubles from quiet
+  positions (7 %) to crowded ones (14 %); when short of time it is 13 % vs. 18 %.
+  Weaker players degrade more (r = −0.48).
+- **Complex tactics are missed *relatively* more by weaker players.** Per candidate,
+  everybody walks into a 4-piece tactic less often than into a plain hanging piece
+  (crowded tactics are rarer and more often forced), but the ratio climbs steeply as
+  rating falls (r = −0.62): a 1200 player is nearly as likely to miss a fork as a
+  hanging piece, a 2500 player misses mostly the complex ones.
+- **Narrow focus is a trait of weaker players.** The 3-most-recent-pieces effect is
+  modest on average (×1.06) but correlates −0.54 with rating, and stronger players
+  return more often to pieces they have not touched for a while (+0.51). That is the
+  "tunnel vision" of club play made measurable.
+- **After removing rating, the individual weights are still real.** The six model
+  terms (`allows_simple`, `allows_complex`, `load_eng_loss`, `load_hangs`,
+  `focus_recent`, `focus_stale`) have split-half reliabilities of 0.61 / 0.36 / 0.51 /
+  0.34 / 0.55 / 0.52 against a null of 0.2, and are essentially uncorrelated with
+  rating once in the model. 59 of 82 players have at least one working-memory trait
+  beyond noise; the most common are "walks into simple tactics" (either direction) and
+  "sticks to recently moved pieces" (narrow focus, 12 players, vs. 5 with the opposite).
+- **As predictors they add little** (ablation: top-1 unchanged, log-loss 1.563 → 1.560).
+  As with attention and plan persistence, the value is in the profile, not the hit
+  rate. The crowdedness term now loads on PCA axis 2.
+
+The profile page shows these under **Working memory** with the counts behind each ratio.
+
 **Where the ceiling is.** Top-1 counts only an exact hit, among ~35 legal moves.
-Published neural human-move predictors reach ~50–55 % on blitz; v3 is in that range
-with a 73-weight model that can explain every prediction. Remaining headroom lies in
-richer personal state (working memory, plans as latent variables) rather than more
-position features.
+Published neural human-move predictors reach ~50–55 % on blitz; v3/v4 is in that range
+with a 79-weight model that can explain every prediction. The personal terms beyond
+Maia-2 now mostly improve calibration (log-loss) and readability rather than top-1;
+the next real gain would need per-player state that Maia does not see, such as a
+latent plan carried across moves or the player's own repertoire beyond the book.
 
 ## Optional: Maia-2 human-move prior
 
@@ -393,7 +433,7 @@ pip install pytest httpx && python -m pytest -q
 
 ## Ideas for next steps
 
-* clock-aware features (Lichess PGNs include `%clk`): blind spots under time pressure,
-* a neural backbone (Maia-style) as the population prior, with the personal model as a
-  fine-tuned head,
-* blind spots by phase / by board region, "tilt" after losing material.
+* a two-stage plan → move mixture model (the current plan terms are soft features),
+* blind spots by phase / by board region, "tilt" after losing material,
+* repertoire memory beyond the opening book: recurring middlegame set-ups per player,
+* fine-tuning Maia-2 per rating band on the cohort to tighten the prior.
