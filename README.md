@@ -339,6 +339,26 @@ time-ordered and nothing from later games leaks into the model):
 For scale, published human-move predictors on Lichess blitz: Maia 1 ≈ 50–53 %,
 Maia-2 ≈ 53–55 %, Maia personalised per player on thousands of games ≈ 55–60 %.
 
+### Where the misses are (frozen test games, 85,216 positions)
+
+`scripts/error_analysis.py` breaks the v5 model's held-out predictions down:
+
+| Slice | Share of moves | Top-1 | Top-3 |
+|---|---|---|---|
+| All moves | 100% | 55.5% | 82.5% |
+| Opening / middlegame / endgame | 27 / 53 / 20% | 61.6 / 52.9 / 54.3% | 85 / 81 / 83% |
+| Played within 3 s / normal / after 15 s+ think | 66 / 31 / 4% | 61.9 / 44.9 / 30.5% | 87 / 76 / 62% |
+| Played move is engine-best / small inaccuracy / clear inaccuracy / blunder | 43 / 23 / 26 / 8% | 76.3 / 51.4 / 34.7 / 24.1% | 95 / 83 / 69 / 58% |
+| Forced (recapture, few moves in check) / free choice | 11 / 89% | 84.6 / 51.8% | 100 / 80% |
+| Model's top probability ≥ 0.9 / 0.7–0.9 / 0.5–0.7 / < 0.3 | 14 / 18 / 24 / 13% | 94.6 / 76.7 / 57.3 / 23.9% | |
+
+Three readings. **The model is well calibrated**: when it says 90 % it is right 95 % of
+the time, so its confidence can be trusted move by move. **The misses are the player's
+mistakes**: good moves are predicted at 76 %, blunders at 24 %; what is left to predict
+is *when and how* a player goes wrong, the least regular part of human play. **Thinking
+makes people unpredictable**: moves played in under three seconds are hit 62 %, moves
+after a long think 31 %. Top-3 is above 80 % in every phase already.
+
 ### Working memory (v4)
 
 Chess cognition research puts a player's working memory at roughly 3–5 "chunks". We
