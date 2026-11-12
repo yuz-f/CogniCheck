@@ -30,7 +30,7 @@ from .features import ALLOW_MOTIFS, FEATURE_LABEL, FEATURE_NAMES, IDX, PositionA
 from .ingest import PlayerGame
 
 BOOK_PLIES = 24
-MIN_EVENTS = 6
+MIN_EVENTS = 10
 
 
 def position_key(board: chess.Board) -> str:
@@ -181,7 +181,7 @@ def blind_spot_stats(decisions: list[Decision]) -> dict:
             n = t.n.get(tag, 0)
             if n < MIN_EVENTS:
                 continue
-            k = 8.0  # shrink small categories towards the player's average
+            k = 12.0  # shrink small categories towards the player's average
             rate = (t.miss[tag] + k * base) / (n + k)
             out.append(
                 {

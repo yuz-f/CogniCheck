@@ -251,20 +251,42 @@ Chess.com rating is not on the Lichess scale, so their map position is approxima
   long diagonals and long-range moves correlates r ≈ −0.55 with rating: stronger players
   see further.
 
-**Prediction on held-out games (mean over 81 players, top-1)**
+**Prediction on held-out games (mean over 82 players, top-1)**
 
-| Model | Top-1 |
-|---|---|
-| Personal model | **38.7%** |
-| Average-player model | 38.0% |
-| Stockfish top move | 34.5% |
-| Random legal move | 5.3% |
+| Model | before | after (v2 features) |
+|---|---|---|
+| Personal model | 38.8% | **40.4%** |
+| Average-player model | 38.1% | 39.5% |
+| Stockfish top move | 34.5% | 34.5% |
+| Random legal move | 5.3% | 5.3% |
+| Personal beats average-player (top-1) | 47 / 82 players | **60 / 82** |
+| Personal beats average-player (log-loss) | 75 / 82 | **77 / 82** |
 
-The personal model assigns higher probability to the moves actually played (better
-log-loss) for **74 of 81** players, so it captures the player better. Its top-1 hit rate
-is higher for 47 of 81 players, but only +0.7 points on average: the first-choice move
-is mostly predictable from the position, and personal traits shift the probabilities
-of the alternatives.
+Ablation on the same split (zero a feature family, refit):
+
+| removed | personal top-1 | log-loss |
+|---|---|---|
+| nothing | 40.4% | 1.973 |
+| habit feature | 39.1% | 2.020 |
+| engine-loss bands + rank | 40.1% | 2.014 |
+| learned blind spots (`allows_*`) | 40.2% | 1.980 |
+| time pressure | 40.3% | 1.978 |
+| all engine features | 33.9% | 2.266 |
+
+The **habit** feature is the single largest personal signal: humans repeat
+(piece, square) choices far more than a position model expects. The engine still
+carries most of the shared predictability. Regularisation was swept over
+λ ∈ {0.001 … 0.3}: λ = 0.01 is at the optimum on held-out log-loss.
+
+On the synthetic personas, the model-learned blind spots now rank the planted one
+first for Kai (knight ×1.21, reliable) and Sasha (backward moves ×1.66, reliable);
+for Tomas the long-range weight is first but not yet beyond noise.
+
+**Where the ceiling is.** Top-1 counts only an exact hit, among ~35 legal moves.
+The remaining gap to the best published human-move predictors (deep networks trained
+on millions of games, ~50–55 %) is the price of a 50-weight model that can explain
+every prediction. The natural next step is to keep this model as the interpretable
+head and feed it a neural position encoder's move probabilities as one more feature.
 
 ## Live games
 

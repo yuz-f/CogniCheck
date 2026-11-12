@@ -171,15 +171,18 @@ async function selectPlayer(id) {
     ["Random legal move", ev.random],
   ].filter(([, v]) => v);
   const bs = p.blind_spots || {};
-  const rows = (bs.rows || []).filter((r) => r.index >= 1.15).slice(0, 8);
+  // Counted blind spots: need real evidence, and rank by index × log(evidence) so a 6/8 fluke
+  // does not outrank a 40/120 pattern.
+  const rows = (bs.rows || []).filter((r) => r.index >= 1.15 && r.events >= 10)
+    .sort((a, b) => (b.index - 1) * Math.log(b.events) - (a.index - 1) * Math.log(a.events)).slice(0, 8);
   const seen = new Set();
   const strengths = (bs.rows || []).filter((r) => r.index <= 0.8).reverse()
     .filter((r) => !seen.has(r.motif) && seen.add(r.motif)).slice(0, 4);
   const reliable = (p.style || []).filter((s) => s.reliable && Math.abs(s.delta) >= 0.1);
   const style = reliable.length ? reliable.slice(0, 10) : (p.style || []).filter((s) => Math.abs(s.delta) >= 0.15).slice(0, 8);
   const learned = (bs.learned || []).filter((r) => r.reliable);
-  const tp = st.time_pressure;
   const st = p.stats || {};
+  const tp = st.time_pressure;
   const kindNote = {
     real: "A real Lichess player (public games). Their 75 most recent rated blitz games were analysed.",
     synthetic: "A synthetic test bot with deliberately built-in habits and blind spots, used to check that the profiler finds them.",
