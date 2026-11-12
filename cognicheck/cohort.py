@@ -269,6 +269,8 @@ def analyse_all(workers: int = 4, depth: int = 5) -> None:
 def _load_ds(pid: str) -> tuple[model.Dataset, np.ndarray]:
     z = np.load(ANALYSIS / f"{pid}.npz")
     X = z["X"].astype(np.float64)
+    if X.shape[1] < len(IDX):  # analysed with an older, narrower feature set: pad with zeros
+        X = np.hstack([X, np.zeros((len(X), len(IDX) - X.shape[1]))])
     maia = ANALYSIS / f"{pid}.maia.npy"
     if maia.exists():
         M = np.load(maia).astype(np.float64)
