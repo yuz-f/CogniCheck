@@ -651,7 +651,7 @@ const field = {
   field.init();
   try {
     const h = await api("/api/health");
-    $("#engine-badge").textContent = h.engine ? "Stockfish: on" : "Stockfish: off (heuristics only)";
+    $("#engine-badge").textContent = `${h.engine ? "Stockfish: on" : "Stockfish: off"} · ${h.neural ? "Maia-2: on" : "Maia-2: off"}`;
   } catch (e) { /* ignore */ }
   await loadPlayers();
 })();

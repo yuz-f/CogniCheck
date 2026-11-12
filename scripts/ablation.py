@@ -15,6 +15,12 @@ FAMILIES = {
     "no time pressure": [f for f in FEATURE_NAMES if f.startswith("tp_")],
     "no engine bands/rank": ["eng_loss_small", "eng_loss_mid", "eng_rank"],
     "no engine at all": [f for f in FEATURE_NAMES if f.startswith("eng_") or f == "tp_eng_loss"],
+    "no Maia-2 prior": ["maia_logp", "maia_top"],
+    "no positional": ["mobility_gain", "passed_pawn", "opens_file", "attacks_weak_pawn", "weakens_shield", "isolates_pawn"],
+    "no think time": ["quick_habit", "quick_eng_loss", "quick_capture", "long_eng_loss", "long_quiet"],
+    "no attention": ["attn_opp", "attn_own", "reacts_harmless"],
+    "no plan persistence": ["same_plan"],
+    "no rating-band prior": [],  # handled below: evaluate against the global prior instead
 }
 players = [p for p in json.loads(cohort.PLAYERS.read_text()) if (cohort.ANALYSIS / f"{p['id']}.npz").exists()]
 prior = cohort.load_population()
@@ -26,10 +32,12 @@ for p in players:
     train_mask = np.array([g not in hold for g in game])
     cohort._fill_habits(ds, train_mask)
     data.append((cohort._subset(ds, train_mask), cohort._subset(ds, ~train_mask)))
+band_priors = [cohort.load_population(p["rating"]) for p in players]
 for name, feats in FAMILIES.items():
     cols = [IDX[f] for f in feats]
     pers, pop = [], []
-    for tr, te in data:
+    for (tr, te), bprior in zip(data, band_priors):
+        prior = cohort.load_population() if name == "no rating-band prior" else bprior
         trX, teX = tr.X.copy(), te.X.copy()
         trX[:, cols] = 0; teX[:, cols] = 0
         tr2, te2 = model.Dataset(trX, tr.starts, tr.chosen), model.Dataset(teX, te.starts, te.chosen)
