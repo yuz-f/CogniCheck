@@ -32,10 +32,21 @@ class Predictor:
         # Blind spots the model itself learned ('allows a ... tactic' weights), odds vs. the average player.
         self.learned: dict[str, float] = {r["motif"]: r["odds"] for r in (profile.blind_spots or {}).get("learned", []) if r.get("reliable")}
         self.habits = getattr(profile, "habits", None) or {}
+        from .head import HeadParams
+
+        self.head = HeadParams.from_json(profile.head) if getattr(profile, "head", None) else None
 
     # ---------------------------------------------------------------- core
+    def scores(self, pa: PositionAnalysis) -> np.ndarray:
+        """Linear personal score plus the non-linear residual (when the profile has one)."""
+        X = pa.X.astype(np.float64)
+        z = X @ self.w
+        if self.head is not None:
+            z = z + self.head.residual(X)
+        return z
+
     def model_distribution(self, pa: PositionAnalysis) -> np.ndarray:
-        return softmax(pa.X.astype(np.float64) @ self.w)
+        return softmax(self.scores(pa))
 
     def book_counts(self, pa: PositionAnalysis) -> dict[str, int]:
         from .profile import position_key
@@ -82,6 +93,9 @@ class Predictor:
             it[0] += float(total[j])
             it[1] += float(personal[j])
             it[2] += float(centred[j]) * (1 if f not in ENGINE_FEATURES or f in ("eng_best",) else -1 if f in ("eng_loss", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss") else 1)
+        if self.head is not None:
+            g_ = self.head.residual(X)
+            items["pattern"] = [float(g_[i] - probs @ g_), float(g_[i] - probs @ g_), 1.0]
         out = []
         for g, (eff, pers, c) in sorted(items.items(), key=lambda kv: -abs(kv[1][0]))[:k]:
             if abs(eff) < 0.15:
@@ -91,6 +105,8 @@ class Predictor:
                 label, has = (pos if eff > 0 else neg), True
                 if g != "engine":
                     has = c > 0
+            elif g == "pattern":
+                label, has = ("fits a pattern this player follows (non-linear)" if eff > 0 else "breaks a pattern this player follows (non-linear)"), True
             else:
                 label, has = FEATURE_LABEL[g], c > 0
             out.append({"feature": g, "label": label, "has": bool(has), "effect": round(eff, 2), "personal": round(pers, 2)})

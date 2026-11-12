@@ -120,11 +120,11 @@ def softmax(scores: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
-def evaluate(ds: Dataset, w: np.ndarray) -> dict:
-    """Top-1/top-3 accuracy and mean log-loss on a dataset."""
+def evaluate(ds: Dataset, w: np.ndarray | None, scores: np.ndarray | None = None) -> dict:
+    """Top-1/top-3 accuracy and mean log-loss on a dataset (``scores`` overrides ``X @ w``)."""
     if len(ds) == 0:
         return {"positions": 0, "top1": 0.0, "top3": 0.0, "logloss": 0.0}
-    z = ds.X @ w
+    z = ds.X @ w if scores is None else np.asarray(scores, dtype=np.float64)
     lse, _ = _seg_logsumexp(z, ds.starts)
     ends = np.append(ds.starts[1:], len(z))
     top1 = top3 = 0

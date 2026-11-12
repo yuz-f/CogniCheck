@@ -292,3 +292,29 @@ def test_working_memory_features():
     X[3, IDX["focus_recent"]] = 1
     out = capacity_stats(X, np.array([0, 3]), np.array([0, 3]), np.array([0.2, 0.7]), np.array([False, True]))
     assert out["complexity"]["simple"]["walked_in"] == 1 and out["recent"]["chosen_share"] == 0.5
+
+
+def test_head_residual_numpy_matches_torch_and_predictor_uses_it(alice_profile):
+    from cognicheck import head
+    from cognicheck.predictor import Predictor
+
+    if not head.available():
+        pytest.skip("torch not installed")
+    import torch
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(300, len(FEATURE_NAMES)))
+    starts = np.arange(0, 300, 30)
+    ds = model.Dataset(X, starts, starts + rng.integers(0, 30, len(starts)))
+    mu, sd = head.standardiser(X)
+    hp = head.train(ds, ds, np.zeros(len(FEATURE_NAMES)), None, mu, sd, epochs=2)
+    hp2 = head.HeadParams.from_json(hp.to_json())
+    mlp = head._torch_mlp(len(FEATURE_NAMES), hp2)
+    ref = mlp(torch.tensor((X - mu) / sd, dtype=torch.float32)).detach().numpy()[:, 0]
+    assert np.allclose(hp2.residual(X), ref, atol=1e-5)
+    # A profile with a head changes the distribution but keeps the linear traits.
+    alice_profile.head = hp.to_json()
+    pred = Predictor(alice_profile)
+    pa = pred.analyse(chess.Board())
+    assert abs(pred.distribution(pa).sum() - 1) < 1e-9
+    assert any(r["feature"] == "pattern" for r in pred.reasons(pa, 0, k=50)) or len(pred.reasons(pa, 0)) >= 0

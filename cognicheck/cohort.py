@@ -44,6 +44,7 @@ ANALYSIS = REAL / "analysis"
 PROFILES_REAL = REAL / "profiles"
 PLAYERS = REAL / "players.json"
 POPULATION_REAL = REAL / "population.json"
+HEAD_REAL = REAL / "head.npz"  # population-pretrained non-linear residual head
 PCA_OUT = REAL / "pca.json"
 
 LICHESS = "https://lichess.org"
@@ -387,7 +388,73 @@ def train_population(players: list[dict]) -> np.ndarray:
         out["bands"].append({"lo": lo, "hi": hi, "players": len(bands[i]), "positions": len(bd) if bd else 0, "weights": [float(x) for x in w]})
     POPULATION_REAL.write_text(json.dumps(out, indent=1))
     print(f"population prior from {len(big)} positions of {len(players)} players, {len(RATING_BANDS)} rating bands", file=sys.stderr)
+    train_population_head(big, prior)
     return prior
+
+
+def train_population_head(big: model.Dataset, prior: np.ndarray) -> None:
+    """Pre-train the non-linear residual on the pooled positions (linear part = global prior)."""
+    from . import head
+
+    if not head.available():
+        return
+    n = len(big)
+    cut = int(n * 0.9)
+    fit = model.Dataset(big.X[: big.starts[cut]], big.starts[:cut], big.chosen[:cut])
+    val = model.Dataset(big.X[big.starts[cut]:], big.starts[cut:] - big.starts[cut], big.chosen[cut:] - big.starts[cut])
+    mu, sd = head.standardiser(big.X)
+    t0 = time.time()
+    hp = head.train(fit, val, prior, None, mu, sd, epochs=25, lr=1e-3, wd=1e-4)
+    hp.save(HEAD_REAL)
+    print(f"population head trained on {n} positions in {time.time() - t0:.0f}s", file=sys.stderr)
+
+
+def fit_head(ds_train: model.Dataset, game_train: np.ndarray, w_lin: np.ndarray):
+    """Fine-tune the population head for one player with ``w_lin`` fixed. The last
+    seventh of the training games is the early-stopping set. None when unavailable."""
+    from . import head
+
+    if not head.available() or not HEAD_REAL.exists():
+        return None
+    init = head.HeadParams.load(HEAD_REAL)
+    games = sorted(set(game_train.tolist()))
+    val = set(games[-max(1, len(games) // 7):])
+    vm = np.isin(game_train, list(val))
+    return head.train(_subset(ds_train, ~vm), _subset(ds_train, vm), w_lin, init, epochs=40, lr=3e-4, wd=1e-4)
+
+
+def _book_eval(pgs, hold: set, ds_test: model.Dataset, scores: dict) -> dict:
+    """Top-1 / log-loss of score vectors blended with the player's opening book
+    (built from the training games) on the held-out positions."""
+    from .predictor import BOOK_ALPHA
+    from .profile import build_book, iter_decisions, position_key
+
+    book = build_book([g for i, g in enumerate(pgs) if i not in hold])
+    keys, ucis = [], []
+    for gi, pg in enumerate(pgs):
+        if gi not in hold:
+            continue
+        for d in iter_decisions(pg, gi, None):
+            if len(d.pa.moves) > 1:
+                keys.append(position_key(d.pa.board))
+                ucis.append([m.uci() for m in d.pa.moves])
+    if len(keys) != len(ds_test):
+        return {}
+    ends = np.append(ds_test.starts[1:], len(ds_test.X))
+    out = {}
+    for name, z in scores.items():
+        hits, ll = 0, 0.0
+        for k, (s, e, c) in enumerate(zip(ds_test.starts, ends, ds_test.chosen)):
+            pr = model.softmax(z[s:e])
+            counts = book.get(keys[k], {})
+            tot = sum(counts.values())
+            if tot:
+                cvec = np.array([counts.get(u, 0) for u in ucis[k]], float)
+                pr = (cvec + BOOK_ALPHA * pr) / (tot + BOOK_ALPHA)
+            hits += int(np.argmax(pr)) == c - s
+            ll -= float(np.log(max(pr[c - s], 1e-9)))
+        out[name] = {"positions": len(ds_test), "top1": hits / len(ds_test), "logloss": ll / len(ds_test)}
+    return out
 
 
 def load_population(rating: float | None = None) -> np.ndarray:
@@ -427,10 +494,20 @@ def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: floa
     ds_train, ds_test = _subset(ds, train_mask), _subset(ds, ~train_mask)
     w_eval = model.fit(ds_train, prior=prior, lam=lam)
     ev = {
-        "personal": model.evaluate(ds_test, w_eval),
+        "personal": model.evaluate(ds_test, w_eval),  # linear model alone
         "population": model.evaluate(ds_test, prior),  # rating-band prior
         "population_global": model.evaluate(ds_test, global_prior),
     }
+    head_eval = fit_head(ds_train, game[train_mask], w_eval)
+    scores = {"personal_linear_book": ds_test.X @ w_eval}
+    if head_eval is not None:
+        z_head = ds_test.X @ w_eval + head_eval.residual(ds_test.X)
+        ev["personal_head"] = model.evaluate(ds_test, None, scores=z_head)
+        scores["personal_with_book"] = z_head
+    else:
+        scores["personal_with_book"] = scores["personal_linear_book"]
+    pgs = games_of(parse_pgn((GAMES / f"{p['id']}.pgn").read_text()), p["username"])
+    ev.update(_book_eval(pgs, hold, ds_test, scores))
     loss_test = ds_test.X[:, IDX["eng_loss"]]
     ends = np.append(ds_test.starts[1:], len(ds_test.X))
     ev["engine_top_move"] = {"top1": float(np.mean([loss_test[c] == loss_test[s:e].min() for s, e, c in zip(ds_test.starts, ends, ds_test.chosen)]))}
@@ -451,8 +528,8 @@ def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: floa
 
     cap_stats = capacity_stats(ds.X, ds.starts, ds.chosen, getattr(ds, "load", None), getattr(ds, "tp", None))
     vectors = {k: cognition_vector(fits[k], prior, extra[k]["blind_spots"], _engine_stats(_subset(ds, masks[k]))) for k in fits}
+    head_all = fit_head(ds_all, game, fits["all"])
     # Full profile for the web app (book + held-out games from the PGN).
-    pgs = games_of(parse_pgn((GAMES / f"{p['id']}.pgn").read_text()), p["username"])
     prof = Profile(
         id=slugify(p["id"]),
         name=p["username"],
@@ -467,6 +544,7 @@ def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: floa
         stats={"games": n_games, "decisions": len(ds), "white_games": extra["white_games"], "black_games": n_games - extra["white_games"], "rating": p["rating"], "source": p.get("source", "lichess blitz")} | {k: round(v, 3) for k, v in _engine_stats(ds).items()} | ({"time_pressure": tp_stats} if tp_stats else {}) | ({"capacity": cap_stats} if cap_stats else {}),
         engine=True,
         habits={"table": table_all, "base_rate": base_all},
+        head=head_all.to_json() if head_all is not None else None,
     )
     PROFILES_REAL.mkdir(parents=True, exist_ok=True)
     prof.save(PROFILES_REAL)
@@ -474,12 +552,24 @@ def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: floa
     return prof
 
 
-def fit_all(lam: float = 0.01, holdout_frac: float = 0.15) -> None:
+def fit_all(lam: float = 0.01, holdout_frac: float = 0.15, workers: int = 4) -> None:
     players = [p for p in json.loads(PLAYERS.read_text()) if (ANALYSIS / f"{p['id']}.npz").exists()]
     cohort_players = [p for p in players if not p.get("added")] or players
     prior = train_population(cohort_players)
-    for p in players:
-        fit_player(p, prior, lam, holdout_frac)
+    import multiprocessing
+
+    t0 = time.time()
+    # spawn: torch was used in this process (population head), fork is unsafe after that
+    with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn")) as ex:
+        futs = {ex.submit(fit_player, p, prior, lam, holdout_frac): p for p in players}
+        for i, f in enumerate(as_completed(futs), 1):
+            p = futs[f]
+            try:
+                prof = f.result()
+                ev = prof.evaluation
+                print(f"  fit {p['username']} ({i}/{len(players)}, {time.time() - t0:.0f}s) top1 linear {ev['personal']['top1']:.3f} full {ev.get('personal_with_book', ev['personal'])['top1']:.3f}", file=sys.stderr)
+            except Exception as e:
+                print(f"  FAILED {p['username']}: {e}", file=sys.stderr)
     print(f"fitted {len(players)} players", file=sys.stderr)
 
 
@@ -754,7 +844,8 @@ def run_pca(n_components: int = 6) -> dict:
 
     acc = {
         k: round(float(np.mean([r["evaluation"][k]["top1"] for r in rows])), 4)
-        for k in ("personal", "population", "engine_top_move", "random")
+        for k in ("personal_with_book", "personal_head", "personal_linear_book", "personal", "population", "engine_top_move", "random")
+        if all(k in r["evaluation"] for r in rows)
     }
     gain = np.array([r["evaluation"]["personal"]["top1"] - r["evaluation"]["population"]["top1"] for r in rows])
     ll_gain = np.array([r["evaluation"]["population"]["logloss"] - r["evaluation"]["personal"]["logloss"] for r in rows])

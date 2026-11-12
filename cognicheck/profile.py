@@ -372,6 +372,7 @@ class Profile:
     engine: bool = False
     created: float = field(default_factory=time.time)
     habits: dict = field(default_factory=dict)  # {"table": {code: [chosen, available]}, "base_rate": r}
+    head: dict | None = None  # non-linear residual (see head.py), plain arrays
 
     def to_json(self) -> dict:
         return {
@@ -390,6 +391,7 @@ class Profile:
             "engine": self.engine,
             "created": self.created,
             "habits": {"table": {str(k): v for k, v in self.habits.get("table", {}).items()}, "base_rate": self.habits.get("base_rate", 0.0)},
+            "head": self.head,
         }
 
     @classmethod
@@ -415,6 +417,7 @@ class Profile:
             engine=d.get("engine", False),
             created=d.get("created", 0),
             habits={"table": {int(k): v for k, v in (d.get("habits") or {}).get("table", {}).items()}, "base_rate": (d.get("habits") or {}).get("base_rate", 0.0)},
+            head=d.get("head"),
         )
 
     def save(self, directory: Path) -> Path:
@@ -429,8 +432,9 @@ class Profile:
 
     def summary(self) -> dict:
         d = self.to_json()
-        for k in ("book", "heldout", "weights", "prior", "feature_names", "habits"):
+        for k in ("book", "heldout", "weights", "prior", "feature_names", "habits", "head"):
             d.pop(k)
+        d["has_head"] = self.head is not None
         d["heldout_games"] = len(self.heldout)
         d["book_positions"] = len(self.book)
         return d
@@ -457,6 +461,16 @@ def load_prior(path: Path | None) -> np.ndarray:
         m = dict(zip(d["feature_names"], d["weights"]))
         return np.array([m.get(f, 0.0) for f in FEATURE_NAMES])
     return np.array([DEFAULT_PRIOR.get(f, 0.0) for f in FEATURE_NAMES])
+
+
+def _fit_head(ds_train, game_train, w):
+    """Non-linear residual for a single-player build, when a population head exists."""
+    try:
+        from .cohort import fit_head
+
+        return fit_head(ds_train, game_train, w)
+    except Exception:
+        return None
 
 
 def build_profile(
@@ -495,6 +509,8 @@ def build_profile(
     ds_test = model.Dataset.from_positions([(d.pa.X, d.chosen) for d in test])
     w = model.fit(ds_train, prior=prior, lam=lam)
     book = build_book(train_games)
+    game_train = np.array([d.game_index for d in train if len(d.pa.moves) > 1])
+    head_eval = _fit_head(ds_train, game_train, w)
 
     evaluation = {}
     if len(ds_test):
@@ -502,7 +518,9 @@ def build_profile(
 
         personal = model.evaluate(ds_test, w)
         population = model.evaluate(ds_test, prior)
-        tmp = Profile(slugify(name), name, w, prior, book, {}, {}, [], {}, [], {}, engine is not None, habits={"table": table, "base_rate": base_rate})
+        if head_eval is not None:
+            evaluation_head = model.evaluate(ds_test, None, scores=ds_test.X @ w + head_eval.residual(ds_test.X))
+        tmp = Profile(slugify(name), name, w, prior, book, {}, {}, [], {}, [], {}, engine is not None, habits={"table": table, "base_rate": base_rate}, head=head_eval.to_json() if head_eval is not None else None)
         pred = Predictor(tmp)
         hits1 = hits3 = 0
         for d in test:
@@ -512,6 +530,8 @@ def build_profile(
             hits3 += d.chosen in order_[:3]
         personal_book = {"positions": len(test), "top1": hits1 / len(test), "top3": hits3 / len(test)}
         evaluation = {"personal": personal, "personal_with_book": personal_book, "population": population}
+        if head_eval is not None:
+            evaluation["personal_head"] = evaluation_head
         if engine is not None:
             hits = sum(int(np.argmax(d.pa.cp)) == d.chosen for d in test if d.pa.cp is not None)
             evaluation["engine_top_move"] = {"positions": len(test), "top1": hits / len(test)}
@@ -523,6 +543,7 @@ def build_profile(
     fill_habits(all_dec, table_all, base_all, loo=True)
     ds_all = model.Dataset.from_positions([(d.pa.X, d.chosen) for d in all_dec])
     w_all = model.fit(ds_all, prior=prior, lam=lam)
+    head_all = _fit_head(ds_all, np.array([d.game_index for d in all_dec if len(d.pa.moves) > 1]), w_all)
     se_all = model.standard_errors(w_all, ds_all, lam)
     style = style_summary(w_all, prior, se_all)
     blind = blind_spot_stats(all_dec)
@@ -563,4 +584,5 @@ def build_profile(
         stats=stats,
         engine=engine is not None,
         habits={"table": table_all, "base_rate": base_all},
+        head=head_all.to_json() if head_all is not None else None,
     )

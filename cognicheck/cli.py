@@ -164,7 +164,7 @@ def cmd_cohort(args):
         else:
             print("maia2/torch not installed - skipping neural features", file=sys.stderr)
     if args.stage in ("fit", "all"):
-        cohort.fit_all()
+        cohort.fit_all(workers=args.workers)
     if args.stage in ("pca", "all"):
         cohort.print_report(cohort.run_pca())
 

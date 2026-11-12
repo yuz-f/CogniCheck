@@ -165,7 +165,8 @@ async function selectPlayer(id) {
   const ev = p.evaluation || {};
   const acc = [
     ["This player's model", ev.personal_with_book || ev.personal],
-    ...(ev.personal_with_book ? [["…without opening book", ev.personal]] : []),
+    ...(ev.personal_head ? [["…without opening book", ev.personal_head]] : []),
+    ...(ev.personal_with_book ? [["…linear part only, no book", ev.personal]] : []),
     ["Average-player model", ev.population],
     ["Stockfish top move", ev.engine_top_move],
     ["Random legal move", ev.random],
