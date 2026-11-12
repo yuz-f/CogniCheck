@@ -253,40 +253,63 @@ Chess.com rating is not on the Lichess scale, so their map position is approxima
 
 **Prediction on held-out games (mean over 82 players, top-1)**
 
-| Model | before | after (v2 features) |
-|---|---|---|
-| Personal model | 38.8% | **40.4%** |
-| Average-player model | 38.1% | 39.5% |
-| Stockfish top move | 34.5% | 34.5% |
-| Random legal move | 5.3% | 5.3% |
-| Personal beats average-player (top-1) | 47 / 82 players | **60 / 82** |
-| Personal beats average-player (log-loss) | 75 / 82 | **77 / 82** |
+| Model | v1 (75 games) | v2 (75 games) | **v3 (200 games, Maia-2)** |
+|---|---|---|---|
+| Personal model | 38.8% | 40.4% | **50.9%** |
+| Average-player model (rating band) | 38.1% | 39.5% | 50.5% |
+| Average-player model (global) | — | — | 49.9% |
+| Stockfish top move | 34.5% | 34.5% | 34.7% |
+| Random legal move | 5.3% | 5.3% | 5.3% |
+| Personal beats average-player (top-1) | 47 / 82 | 60 / 82 | 53 / 82 |
+| Personal beats average-player (log-loss) | 75 / 82 | 77 / 82 | **78 / 82** |
+| Personal log-loss | — | 1.973 | **1.563** |
 
-Ablation on the same split (zero a feature family, refit):
+v3 adds the Maia-2 human-move prior as a feature, 200 games per player instead of 75,
+positional, think-time, attention and plan-persistence features, and rating-band priors.
+The jump to ~51 % reaches the level of the published neural predictors, while every
+prediction is still a sum of readable terms.
 
-| removed | personal top-1 | log-loss |
-|---|---|---|
-| nothing | 40.4% | 1.973 |
-| habit feature | 39.1% | 2.020 |
-| engine-loss bands + rank | 40.1% | 2.014 |
-| learned blind spots (`allows_*`) | 40.2% | 1.980 |
-| time pressure | 40.3% | 1.978 |
-| all engine features | 33.9% | 2.266 |
+Ablation on the v3 split (zero a feature family, refit, 82 players):
 
-The **habit** feature is the single largest personal signal: humans repeat
-(piece, square) choices far more than a position model expects. The engine still
-carries most of the shared predictability. Regularisation was swept over
-λ ∈ {0.001 … 0.3}: λ = 0.01 is at the optimum on held-out log-loss.
+| removed | personal top-1 | log-loss | personal beats population (top-1) |
+|---|---|---|---|
+| nothing | 50.9% | 1.563 | 53 / 82 |
+| Maia-2 prior | 41.0% | 1.939 | 80 / 82 |
+| all engine features | 50.4% | 1.603 | 59 / 82 |
+| habit feature | 50.2% | 1.576 | 61 / 82 |
+| engine-loss bands + rank | 50.9% | 1.578 | 54 / 82 |
+| think-time interactions | 50.9% | 1.570 | 49 / 82 |
+| time pressure | 50.8% | 1.568 | 54 / 82 |
+| attention map | 50.7% | 1.567 | 54 / 82 |
+| learned blind spots (`allows_*`) | 50.8% | 1.564 | 52 / 82 |
+| rating-band prior (global instead) | 50.9% | 1.563 | 58 / 82 |
+| plan persistence | 50.9% | 1.563 | 55 / 82 |
+| positional | 50.9% | 1.564 | 56 / 82 |
 
-On the synthetic personas, the model-learned blind spots now rank the planted one
+How to read this: the **Maia-2 prior is now the backbone** (−10 points without it) and
+it absorbs most of what the engine, habit and style terms used to carry on their own.
+Without Maia the personal model still beats its population counterpart for 80 of 82
+players, so the personal signal is real; with Maia the average-player model is already
+strong and the personal gain shows mainly in log-loss (78 / 82) rather than top-1. The
+new families (attention, plan persistence, think time, positional) each cost ≤0.2
+points when removed: they are weak as *predictors* but they are the terms that make a
+profile readable, and several come out as reliable traits for individual players
+(e.g. own-attention ×1.8, plan persistence ×1.3 for a 2000-rated player).
+
+With 200 games the PCA axes are markedly more stable than with 75 (split-half
+r = 0.90 / 0.71 / 0.72 / 0.84 / 0.74 / 0.75 for PC1–PC6, null ≈ 0.2). The axis readings
+above still hold; the new attention trait ("answers the opponent's last move although it
+threatened nothing") loads on PC6.
+
+On the synthetic personas, the model-learned blind spots rank the planted one
 first for Kai (knight ×1.21, reliable) and Sasha (backward moves ×1.66, reliable);
-for Tomas the long-range weight is first but not yet beyond noise.
+for Tomas the long-range weight is first but not beyond noise.
 
 **Where the ceiling is.** Top-1 counts only an exact hit, among ~35 legal moves.
-The remaining gap to the best published human-move predictors (deep networks trained
-on millions of games, ~50–55 %) is the price of a 50-weight model that can explain
-every prediction. The natural next step is to keep this model as the interpretable
-head and feed it a neural position encoder's move probabilities as one more feature.
+Published neural human-move predictors reach ~50–55 % on blitz; v3 is in that range
+with a 73-weight model that can explain every prediction. Remaining headroom lies in
+richer personal state (working memory, plans as latent variables) rather than more
+position features.
 
 ## Optional: Maia-2 human-move prior
 
