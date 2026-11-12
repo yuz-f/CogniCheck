@@ -248,7 +248,10 @@ def test_neural_features_if_available():
         pytest.skip("maia2 weights not installed")
     n = neural.Neural()
     b = chess.Board()
+    assert analyse_position(b, neural=n, elo_self=1500, elo_oppo=1500).X[:, IDX["maia_top"]].sum() == 0  # too early
+    for u in ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5", "c2c3", "g8f6", "d2d4", "e5d4", "c3d4"):
+        b.push_uci(u)
     pa = analyse_position(b, neural=n, elo_self=1500, elo_oppo=1500)
     logp = pa.X[:, IDX["maia_logp"]]
     assert pa.X[:, IDX["maia_top"]].sum() == 1
-    assert logp.max() <= 0 and logp[pa.index(chess.Move.from_uci("e2e4"))] > logp[pa.index(chess.Move.from_uci("a2a3"))]
+    assert logp.max() <= 0 and logp[pa.index(chess.Move.from_uci("c5b4"))] > logp[pa.index(chess.Move.from_uci("a7a6"))]

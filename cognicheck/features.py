@@ -85,6 +85,7 @@ FEATURES: list[tuple[str, str]] = [
     ("maia_top", "the move a typical human of this rating would play (Maia-2)"),
 ]
 NEURAL_FEATURES = {"maia_logp", "maia_top"}
+NEURAL_FROM_PLY = 10
 PLANS = [
     ("mate", "go for mate"),
     ("attack", "attack the king"),
@@ -484,7 +485,9 @@ def analyse_position(
             if tp:
                 row[IDX["tp_eng_loss"]] = row[IDX["eng_loss"]]
 
-    if neural is not None and n:
+    # Maia-2 is unreliable in the first plies (its training data starts later);
+    # the opening book and habits cover those, so the prior starts at ply 10.
+    if neural is not None and n and board.ply() >= NEURAL_FROM_PLY:
         es = int(elo_self or 1500)
         logp, top = neural.features(board, moves, es, int(elo_oppo or es))
         X[:, IDX["maia_logp"]] = logp / 3.0  # roughly [-2, 0]
