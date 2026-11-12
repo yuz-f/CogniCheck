@@ -307,8 +307,12 @@ def style_summary(weights: np.ndarray, prior: np.ndarray, se: np.ndarray | None 
     ``reliable`` means the deviation is at least two standard errors from zero;
     anything else may be noise from too few relevant positions.
     """
+    from .features import POSITION_FEATURES
+
     out = []
     for i, f in enumerate(FEATURE_NAMES):
+        if f in POSITION_FEATURES:
+            continue  # constant within a position: carries no weight of its own
         dlt = float(weights[i] - prior[i])
         s_ = float(se[i]) if se is not None and np.isfinite(se[i]) else None
         z = dlt / s_ if s_ else 0.0

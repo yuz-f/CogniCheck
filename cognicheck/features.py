@@ -89,13 +89,36 @@ FEATURES: list[tuple[str, str]] = [
     ("load_hangs", "leaves material en prise, in a crowded position"),
     ("focus_recent", "moves one of the 3 pieces moved most recently"),
     ("focus_stale", "moves a piece untouched for 8+ own moves"),
+    ("greedy_gain", "captures a piece that looks free but is defended (greedy)"),
+    ("creates_threat", "creates a threat against a valuable piece"),
+    ("threat_hangs", "attacks with a piece that can simply be taken"),
+    ("hangs_moved", "leaves the moved piece itself en prise"),
+    ("hangs_other", "leaves a different piece en prise (not the one moved)"),
+    ("load", "pieces in contact (position)"),
+    ("behind", "behind in material (position)"),
+    ("ahead", "ahead in material (position)"),
+    ("just_lost", "has just lost material (position)"),
+    ("behind_eng_loss", "objective loss, when behind in material"),
+    ("ahead_eng_loss", "objective loss, when ahead in material"),
+    ("tilt_eng_loss", "objective loss, right after losing material"),
 ]
 NEURAL_FEATURES = {"maia_logp", "maia_top"}
 NEURAL_FROM_PLY = 10
 # Working-memory features: computable without an engine (the load_* products need
 # the engine columns, which exist in the stored analysis).
 MEMORY_FEATURES = ["allows_simple", "allows_complex", "focus_recent", "focus_stale"]
-LOAD_FEATURES = {"load_eng_loss": "eng_loss", "load_hangs": "hangs"}
+# All engine-free columns that can be (re)computed for a stored analysis without Stockfish.
+DERIVED_FEATURES = MEMORY_FEATURES + ["greedy_gain", "creates_threat", "threat_hangs", "hangs_moved", "hangs_other", "load", "behind", "ahead", "just_lost"]
+# Products of two stored columns, recomputed at load time (one factor is usually an engine column).
+PRODUCT_FEATURES = {
+    "load_eng_loss": ("load", "eng_loss"),
+    "load_hangs": ("load", "hangs"),
+    "behind_eng_loss": ("behind", "eng_loss"),
+    "ahead_eng_loss": ("ahead", "eng_loss"),
+    "tilt_eng_loss": ("just_lost", "eng_loss"),
+}
+POSITION_FEATURES = {"load", "behind", "ahead", "just_lost"}  # constant within a position: only matter via products
+MATERIAL_EDGE = 2  # pawns
 MAX_CONTACTS = 16  # attacker-victim pairs; normalises the "load" of a position
 FOCUS_RECENT = 3  # pieces a player keeps in working memory (Cowan's 3-5)
 FOCUS_STALE = 8  # own moves without touching a piece
@@ -118,7 +141,7 @@ HABIT_ALPHA = 2.0
 FEATURE_NAMES = [f for f, _ in FEATURES]
 FEATURE_LABEL = dict(FEATURES)
 IDX = {f: i for i, f in enumerate(FEATURE_NAMES)}
-ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "quick_eng_loss", "long_eng_loss", "load_eng_loss"}
+ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "quick_eng_loss", "long_eng_loss", "load_eng_loss", "behind_eng_loss", "ahead_eng_loss", "tilt_eng_loss"}
 D = len(FEATURE_NAMES)
 
 PIECE_FEATURE = {
@@ -361,6 +384,23 @@ def own_recency(board: chess.Board, color: chess.Color) -> tuple[dict[int, int],
     return last, k
 
 
+def material(board: chess.Board, color: chess.Color) -> int:
+    return sum(tactics.VALUE[pt] * len(board.pieces(pt, color)) for pt in (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN))
+
+
+def game_state(board: chess.Board, color: chess.Color) -> tuple[int, int, bool]:
+    """(material balance for ``color``, balance two plies ago, lost >= 1 pawn since)."""
+    bal = material(board, color) - material(board, not color)
+    if len(board.move_stack) >= 2:
+        b = board.copy()
+        b.pop()
+        b.pop()
+        before = material(b, color) - material(b, not color)
+    else:
+        before = bal
+    return bal, before, (before - bal) >= 1
+
+
 def previous_plan(board: chess.Board) -> str | None:
     """Plan of the side-to-move's previous move, read from the position before it."""
     if len(board.move_stack) < 2:
@@ -414,6 +454,8 @@ def analyse_position(
     opportunities = tactics.winning_captures(board, min_gain=2)
 
     load = min(contacts(board), MAX_CONTACTS) / MAX_CONTACTS
+    balance, _, just_lost = game_state(board, color)
+    behind, ahead = balance <= -MATERIAL_EDGE, balance >= MATERIAL_EDGE
     last_touch, own_moves = own_recency(board, color)
     recent_squares = {sq for sq, _ in sorted(last_touch.items(), key=lambda kv: -kv[1])[:FOCUS_RECENT]}
 
@@ -442,6 +484,10 @@ def analyse_position(
             row[IDX["castle"]] = 1
         else:
             row[IDX[PIECE_FEATURE[pt]]] = 1
+        row[IDX["load"]] = load
+        row[IDX["behind"]] = float(behind)
+        row[IDX["ahead"]] = float(ahead)
+        row[IDX["just_lost"]] = float(just_lost)
         if m.from_square in recent_squares:
             row[IDX["focus_recent"]] = 1
         if own_moves >= FOCUS_STALE and own_moves - last_touch.get(m.from_square, 0) >= FOCUS_STALE:
@@ -451,6 +497,10 @@ def analyse_position(
         gain = tactics.see(board, m)
         if is_cap:
             row[IDX["capture"]] = 1
+            victim = board.piece_at(m.to_square)
+            naive = tactics.VALUE[victim.piece_type] if victim else 1  # en passant
+            if naive - gain > 0:
+                row[IDX["greedy_gain"]] = min(naive - gain, 9) / 3.0
             row[IDX["capture_gain"]] = np.clip(gain, -9, 9) / 3.0
             if gain == 0:
                 row[IDX["equal_trade"]] = 1
@@ -534,6 +584,8 @@ def analyse_position(
                 if p_ and p_.color != color and p_.piece_type == chess.PAWN and not board.is_attacked_by(not color, t):
                     row[IDX["attacks_weak_pawn"]] = 1
                     break
+        if pt != chess.KING and tactics._valuable_targets(board, m.to_square, color):
+            row[IDX["creates_threat"]] = 1
         if board.is_checkmate():
             row[IDX["mate"]] = 1
             mates.append(m)
@@ -554,6 +606,13 @@ def analyse_position(
         after_capture[i] = oc
         row[IDX["hangs"]] = min(og, 9) / 3.0
         row[IDX["load_hangs"]] = load * row[IDX["hangs"]]
+        if og >= 1 and oc is not None:
+            if oc.to_square == m.to_square:
+                row[IDX["hangs_moved"]] = 1
+                if row[IDX["creates_threat"]]:
+                    row[IDX["threat_hangs"]] = 1
+            else:
+                row[IDX["hangs_other"]] = 1
         if tp:
             row[IDX["tp_hangs"]] = row[IDX["hangs"]]
             row[IDX["tp_capture"]] = row[IDX["capture"]]
@@ -572,6 +631,9 @@ def analyse_position(
             row[IDX["eng_loss_mid"]] = 1.0 if 0.5 < loss < 2.0 else 0.0
             row[IDX["eng_rank"]] = rank[i] / (n - 1) if n > 1 else 0.0
             row[IDX["load_eng_loss"]] = load * row[IDX["eng_loss"]]
+            row[IDX["behind_eng_loss"]] = float(behind) * row[IDX["eng_loss"]]
+            row[IDX["ahead_eng_loss"]] = float(ahead) * row[IDX["eng_loss"]]
+            row[IDX["tilt_eng_loss"]] = float(just_lost) * row[IDX["eng_loss"]]
             if tp:
                 row[IDX["tp_eng_loss"]] = row[IDX["eng_loss"]]
 

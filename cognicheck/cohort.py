@@ -196,33 +196,31 @@ def _maia_player(pid: str, username: str) -> str:
 
 
 def _memory_player(pid: str, username: str) -> str:
-    """Working-memory columns (engine-free) for one player, aligned with the stored rows.
-    Saves [allows_simple, allows_complex, focus_recent, focus_stale] per row and the
-    position load separately."""
-    from .features import MEMORY_FEATURES
+    """Engine-free derived columns (working memory, traps, game state) for one player,
+    aligned with the stored rows. Saved as ``{pid}.ctx.npz``."""
+    from .features import DERIVED_FEATURES
     from .profile import iter_decisions
 
-    out = ANALYSIS / f"{pid}.mem.npz"
+    out = ANALYSIS / f"{pid}.ctx.npz"
     if out.exists():
         return pid
     z = np.load(ANALYSIS / f"{pid}.npz")
     games = games_of(parse_pgn((GAMES / f"{pid}.pgn").read_text()), username)
-    cols, loads = [], []
+    cols = []
     for gi, pg in enumerate(games):
         for d in iter_decisions(pg, gi, None):
             if len(d.pa.moves) > 1:
-                cols.append(d.pa.X[:, [IDX[f] for f in MEMORY_FEATURES]])
-                loads.append(d.pa.load)
-    M = np.concatenate(cols) if cols else np.zeros((0, len(MEMORY_FEATURES)), np.float32)
+                cols.append(d.pa.X[:, [IDX[f] for f in DERIVED_FEATURES]])
+    M = np.concatenate(cols) if cols else np.zeros((0, len(DERIVED_FEATURES)), np.float32)
     if len(M) != len(z["X"]):
-        raise RuntimeError(f"{pid}: memory rows {len(M)} != feature rows {len(z['X'])}")
-    np.savez_compressed(out, M=M.astype(np.float16), load=np.array(loads, np.float32))
+        raise RuntimeError(f"{pid}: derived rows {len(M)} != feature rows {len(z['X'])}")
+    np.savez_compressed(out, M=M.astype(np.float16), names=np.array(DERIVED_FEATURES))
     return pid
 
 
 def memory_all(workers: int = 4) -> None:
     players = json.loads(PLAYERS.read_text())
-    todo = [p for p in players if (ANALYSIS / f"{p['id']}.npz").exists() and not (ANALYSIS / f"{p['id']}.mem.npz").exists()]
+    todo = [p for p in players if (ANALYSIS / f"{p['id']}.npz").exists() and not (ANALYSIS / f"{p['id']}.ctx.npz").exists()]
     t0 = time.time()
     with ProcessPoolExecutor(workers) as ex:
         futs = {ex.submit(_memory_player, p["id"], p["username"]): p for p in todo}
@@ -278,20 +276,19 @@ def _load_ds(pid: str) -> tuple[model.Dataset, np.ndarray]:
         if len(M) == len(X):
             X[:, IDX["maia_logp"]] = M[:, 0]
             X[:, IDX["maia_top"]] = M[:, 1]
-    mem = ANALYSIS / f"{pid}.mem.npz"
+    ctx = ANALYSIS / f"{pid}.ctx.npz"
     load = None
-    if mem.exists():
-        zm = np.load(mem)
-        M = zm["M"].astype(np.float64)
-        if len(M) == len(X):
-            from .features import LOAD_FEATURES, MEMORY_FEATURES
+    if ctx.exists():
+        from .features import PRODUCT_FEATURES
 
-            for j, f in enumerate(MEMORY_FEATURES):
+        zc = np.load(ctx)
+        M = zc["M"].astype(np.float64)
+        if len(M) == len(X):
+            for j, f in enumerate(zc["names"].tolist()):
                 X[:, IDX[f]] = M[:, j]
-            load = zm["load"].astype(np.float64)
-            per_row = np.repeat(load, np.diff(np.append(z["starts"], len(X))))
-            for f, base in LOAD_FEATURES.items():
-                X[:, IDX[f]] = per_row * X[:, IDX[base]]
+            for f, (a, b) in PRODUCT_FEATURES.items():
+                X[:, IDX[f]] = X[:, IDX[a]] * X[:, IDX[b]]
+            load = X[z["starts"], IDX["load"]]
     ds = model.Dataset(X, z["starts"], z["chosen"])
     ds.load = load  # type: ignore[attr-defined]
     ds.code = z["code"] if "code" in z else None  # type: ignore[attr-defined]
@@ -699,7 +696,7 @@ def _finish_add(entry, pid, username, depth, prior, step) -> dict:
 
 
 # ---------------------------------------------------------------------- PCA
-STYLE_SKIP = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "tp_hangs", "tp_capture", "quick_eng_loss", "long_eng_loss", "maia_logp", "maia_top"}  # strength / sparse
+STYLE_SKIP = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "tp_hangs", "tp_capture", "quick_eng_loss", "long_eng_loss", "maia_logp", "maia_top", "load", "behind", "ahead", "just_lost"}  # strength / sparse / position constants
 
 
 def cognition_vector(w: np.ndarray, prior: np.ndarray, blind: dict, stats: dict) -> dict[str, float]:

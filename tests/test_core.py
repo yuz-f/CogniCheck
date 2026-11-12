@@ -318,3 +318,24 @@ def test_head_residual_numpy_matches_torch_and_predictor_uses_it(alice_profile):
     pa = pred.analyse(chess.Board())
     assert abs(pred.distribution(pa).sum() - 1) < 1e-9
     assert any(r["feature"] == "pattern" for r in pred.reasons(pa, 0, k=50)) or len(pred.reasons(pa, 0)) >= 0
+
+
+def test_trap_and_game_state_features():
+    # Nxe5 takes a pawn defended by the d6 pawn: looks free, is not (greedy), and the knight is then en prise.
+    b = chess.Board("4k3/8/3p4/4p3/8/5N2/8/4K3 w - - 0 1")
+    pa = analyse_position(b)
+    i = pa.index(chess.Move.from_uci("f3e5"))
+    assert pa.X[i, IDX["greedy_gain"]] == 1.0 and pa.X[i, IDX["hangs_moved"]] == 1 and pa.X[i, IDX["hangs_other"]] == 0
+    # Bishop e5 attacks the rook a1. Ke2 leaves the rook hanging (a different piece); Ra5 attacks the bishop.
+    c = chess.Board("4k3/8/8/4b3/8/8/8/R3K3 w - - 0 1")
+    pa2 = analyse_position(c)
+    assert pa2.X[pa2.index(chess.Move.from_uci("e1e2")), IDX["hangs_other"]] == 1
+    assert pa2.X[pa2.index(chess.Move.from_uci("e1e2")), IDX["hangs_moved"]] == 0
+    assert pa2.X[pa2.index(chess.Move.from_uci("a1a5")), IDX["creates_threat"]] == 1
+    # Game state: Black has just lost a knight for nothing -> just_lost and behind.
+    d = chess.Board()
+    for u in ("e2e4", "e7e5", "d1h5", "g8f6", "h5h4", "f6g4", "h4g4"):
+        d.push_uci(u)
+    pa3 = analyse_position(d)
+    assert pa3.X[0, IDX["just_lost"]] == 1 and pa3.X[0, IDX["behind"]] == 1 and pa3.X[0, IDX["ahead"]] == 0
+    assert pa3.X[:, IDX["behind"]].min() == 1  # constant within the position
