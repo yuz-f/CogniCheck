@@ -183,6 +183,20 @@ async function selectPlayer(id) {
   const learned = (bs.learned || []).filter((r) => r.reliable);
   const st = p.stats || {};
   const tp = st.time_pressure;
+  const cap = st.capacity || null;
+  const capRows = [];
+  if (cap) {
+    const cx = cap.complexity || {};
+    if (cx.complex_over_simple != null) capRows.push(["Walks into complex tactics (4+ pieces) vs simple ones", cx.complex_over_simple, `×${cx.complex_over_simple.toFixed(2)} <small>${cx.complex.walked_in}/${cx.complex.available} vs ${cx.simple.walked_in}/${cx.simple.available}</small>`]);
+    const ov = cap.overload || {};
+    if (ov.crowded_over_quiet != null) {
+      const q = ov.buckets[0], c = ov.buckets[2];
+      capRows.push(["Blunders in crowded positions vs quiet ones", ov.crowded_over_quiet, `×${ov.crowded_over_quiet.toFixed(2)} <small>${pct(c.blunder_rate)} vs ${pct(q.blunder_rate)}</small>`]);
+    }
+    if (cap.recent && cap.recent.index != null) capRows.push(["Moves one of the 3 pieces moved most recently", cap.recent.index, `×${cap.recent.index.toFixed(2)} <small>${pct(cap.recent.chosen_share)} of moves, ${pct(cap.recent.candidate_share)} of options</small>`]);
+    if (cap.stale && cap.stale.index != null) capRows.push(["Returns to a piece untouched for 8+ moves", cap.stale.index, `×${cap.stale.index.toFixed(2)} <small>${pct(cap.stale.chosen_share)} of moves, ${pct(cap.stale.candidate_share)} of options</small>`]);
+  }
+  const memStyle = (p.style || []).filter((s) => ["allows_simple", "allows_complex", "load_eng_loss", "load_hangs", "focus_recent", "focus_stale"].includes(s.feature) && s.reliable);
   const kindNote = {
     real: "A real Lichess player (public games). Their 75 most recent rated blitz games were analysed.",
     synthetic: "A synthetic test bot with deliberately built-in habits and blind spots, used to check that the profiler finds them.",
@@ -217,6 +231,14 @@ async function selectPlayer(id) {
       <p class="muted">Index = how much more often they miss this kind of move than their own average (1.0 = their average). Threats: they don't react. Walk-ins: they allow it. Opportunities: they don't play it. Small counts are shrunk towards 1.</p>
       ${rows.length ? rows.map((r) => barRow(esc(r.label), r.index, 3, `×${r.index.toFixed(2)} <small>${r.missed}/${r.events}</small>`) + (r.examples || []).slice(0, 1).map((e) => `<div class="example">e.g. move ${e.move_number}: played ${esc(e.played)}, ${esc(e.note)}</div>`).join("")).join("") : `<p class="muted">No clear blind spot yet (needs more games).</p>`}
       ${strengths.length ? `<h4>Sharp at</h4>${strengths.map((r) => `<span class="tag">${esc(r.label.replace(/^(Overlooks threats from|Misses winning|Walks into) /, ""))} ×${r.index.toFixed(2)}</span>`).join("")}` : ""}
+    </div>
+    ${capRows.length ? `<div class="s6 cell">
+      <h3>Working memory</h3>
+      <p class="muted">How many pieces this player seems to hold in mind at once. ×1 = no effect; above 1 means the pattern is stronger than chance or than their own baseline. Counted in their games; the model weights below are what the predictor actually uses.</p>
+      ${capRows.map(([l, v, t]) => barRow(l, v, 3, t)).join("")}
+      ${memStyle.length ? `<p class="kicker">Learned by the model</p>${memStyle.map((s) => divRow(esc(s.label), s.delta, `×${s.odds.toFixed(2)} <small>±${(s.se || 0).toFixed(2)}</small>`)).join("")}` : ""}
+    </div>` : ""}
+    <div class="s6 cell">
       ${(p.refutations && p.refutations.rows && p.refutations.rows.length) ? `<h4>What punishes their blunders (engine)</h4>${p.refutations.rows.slice(0, 4).map((r) => barRow(esc(r.label), r.lift, 3, `×${r.lift.toFixed(2)}`)).join("")}` : ""}
     </div>
   </div>`;

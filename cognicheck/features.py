@@ -83,9 +83,22 @@ FEATURES: list[tuple[str, str]] = [
     ("same_plan", "continues the player's previous plan"),
     ("maia_logp", "how typical the move is for a human of this rating (Maia-2)"),
     ("maia_top", "the move a typical human of this rating would play (Maia-2)"),
+    ("allows_simple", "allows a simple tactic (2 pieces involved)"),
+    ("allows_complex", "allows a complex tactic (4+ pieces involved)"),
+    ("load_eng_loss", "objective loss, in a crowded position (many pieces in contact)"),
+    ("load_hangs", "leaves material en prise, in a crowded position"),
+    ("focus_recent", "moves one of the 3 pieces moved most recently"),
+    ("focus_stale", "moves a piece untouched for 8+ own moves"),
 ]
 NEURAL_FEATURES = {"maia_logp", "maia_top"}
 NEURAL_FROM_PLY = 10
+# Working-memory features: computable without an engine (the load_* products need
+# the engine columns, which exist in the stored analysis).
+MEMORY_FEATURES = ["allows_simple", "allows_complex", "focus_recent", "focus_stale"]
+LOAD_FEATURES = {"load_eng_loss": "eng_loss", "load_hangs": "hangs"}
+MAX_CONTACTS = 16  # attacker-victim pairs; normalises the "load" of a position
+FOCUS_RECENT = 3  # pieces a player keeps in working memory (Cowan's 3-5)
+FOCUS_STALE = 8  # own moves without touching a piece
 PLANS = [
     ("mate", "go for mate"),
     ("attack", "attack the king"),
@@ -105,7 +118,7 @@ HABIT_ALPHA = 2.0
 FEATURE_NAMES = [f for f, _ in FEATURES]
 FEATURE_LABEL = dict(FEATURES)
 IDX = {f: i for i, f in enumerate(FEATURE_NAMES)}
-ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "quick_eng_loss", "long_eng_loss"}
+ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "quick_eng_loss", "long_eng_loss", "load_eng_loss"}
 D = len(FEATURE_NAMES)
 
 PIECE_FEATURE = {
@@ -163,6 +176,7 @@ class PositionAnalysis:
     quick: bool = False  # the move was (or is being) played within QUICK_SECONDS
     long: bool = False
     prev_plan: str | None = None
+    load: float = 0.0  # pieces in contact / MAX_CONTACTS (position-level)
 
     def index(self, move: chess.Move) -> int:
         return self.moves.index(move)
@@ -286,6 +300,67 @@ def _attention(stack: list[chess.Move], sq_from: chess.Square, sq_to: chess.Squa
     return min(total, 1.0)
 
 
+def contacts(board: chess.Board) -> int:
+    """Number of attacker-victim pairs on the board: how much there is to keep track of."""
+    n = 0
+    for sq, p in board.piece_map().items():
+        n += len(board.attackers(not p.color, sq))
+    return n
+
+
+def refutation_complexity(board: chess.Board, cap: chess.Move) -> int:
+    """Pieces a player must hold in mind to see the tactic ``cap`` (board after our move).
+
+    Counts every piece bearing on the target square (attackers and defenders of both
+    colours, the capturer included), the target itself, further targets the capturer
+    hits from its landing square (forks) and pieces it unmasks (discovered attacks).
+    """
+    tgt = cap.to_square
+    involved = set(board.attackers(chess.WHITE, tgt)) | set(board.attackers(chess.BLACK, tgt))
+    involved.add(tgt)
+    b = board.copy(stack=False)
+    b.push(cap)
+    mover = not b.turn
+    for t in tactics._valuable_targets(b, tgt, mover):
+        involved.add(t)
+    for pt in (chess.BISHOP, chess.ROOK, chess.QUEEN):
+        for s_ in b.pieces(pt, mover):
+            if s_ == tgt:
+                continue
+            for t in tactics._valuable_targets(b, s_, mover):
+                if cap.from_square in chess.SquareSet.between(s_, t):
+                    involved.add(s_)
+                    involved.add(t)
+    return len(involved)
+
+
+def own_recency(board: chess.Board, color: chess.Color) -> tuple[dict[int, int], int]:
+    """For each square holding a piece of ``color``: the ordinal of the player's own
+    move that last touched it (0 = never). Also returns how many own moves were made.
+    Reconstructed from the move stack without replaying the game."""
+    stack = board.move_stack
+    n = len(stack)
+    last: dict[int, int] = {}
+    k = 0
+    for i, mv in enumerate(stack):
+        mover = board.turn if (n - i) % 2 == 0 else not board.turn
+        if mover == color:
+            k += 1
+            last.pop(mv.from_square, None)
+            last[mv.to_square] = k
+            if mv.from_square in (chess.E1, chess.E8) and abs(chess.square_file(mv.to_square) - 4) == 2:
+                rank = chess.square_rank(mv.from_square)
+                if chess.square_file(mv.to_square) == 6:
+                    last.pop(chess.square(7, rank), None)
+                    last[chess.square(5, rank)] = k
+                else:
+                    last.pop(chess.square(0, rank), None)
+                    last[chess.square(3, rank)] = k
+        else:
+            last.pop(mv.to_square, None)  # our piece was captured there
+    return last, k
+
+
 def previous_plan(board: chess.Board) -> str | None:
     """Plan of the side-to-move's previous move, read from the position before it."""
     if len(board.move_stack) < 2:
@@ -338,6 +413,10 @@ def analyse_position(
     mate_threats = tactics.mate_threat(board)
     opportunities = tactics.winning_captures(board, min_gain=2)
 
+    load = min(contacts(board), MAX_CONTACTS) / MAX_CONTACTS
+    last_touch, own_moves = own_recency(board, color)
+    recent_squares = {sq for sq, _ in sorted(last_touch.items(), key=lambda kv: -kv[1])[:FOCUS_RECENT]}
+
     engine_scores = engine.evaluate_all(board) if engine is not None and n else None
     cp = None
     replies: list[chess.Move | None] = [None] * n
@@ -363,6 +442,10 @@ def analyse_position(
             row[IDX["castle"]] = 1
         else:
             row[IDX[PIECE_FEATURE[pt]]] = 1
+        if m.from_square in recent_squares:
+            row[IDX["focus_recent"]] = 1
+        if own_moves >= FOCUS_STALE and own_moves - last_touch.get(m.from_square, 0) >= FOCUS_STALE:
+            row[IDX["focus_stale"]] = 1
 
         is_cap = board.is_capture(m)
         gain = tactics.see(board, m)
@@ -461,10 +544,16 @@ def analyse_position(
                 for t in tactics.motifs(board, oc):
                     if t in ALLOW_MOTIFS:
                         row[IDX["allows_" + t]] = 1
+                cx = refutation_complexity(board, oc)
+                if cx <= 2:
+                    row[IDX["allows_simple"]] = 1
+                elif cx >= 4:
+                    row[IDX["allows_complex"]] = 1
         board.pop()
         after_gain[i] = og
         after_capture[i] = oc
         row[IDX["hangs"]] = min(og, 9) / 3.0
+        row[IDX["load_hangs"]] = load * row[IDX["hangs"]]
         if tp:
             row[IDX["tp_hangs"]] = row[IDX["hangs"]]
             row[IDX["tp_capture"]] = row[IDX["capture"]]
@@ -482,6 +571,7 @@ def analyse_position(
             row[IDX["eng_loss_small"]] = 1.0 if 0.1 < loss <= 0.5 else 0.0
             row[IDX["eng_loss_mid"]] = 1.0 if 0.5 < loss < 2.0 else 0.0
             row[IDX["eng_rank"]] = rank[i] / (n - 1) if n > 1 else 0.0
+            row[IDX["load_eng_loss"]] = load * row[IDX["eng_loss"]]
             if tp:
                 row[IDX["tp_eng_loss"]] = row[IDX["eng_loss"]]
 
@@ -518,6 +608,7 @@ def analyse_position(
         quick=bool(quick),
         long=bool(long),
         prev_plan=prev_plan,
+        load=load,
     )
     fill_time_interactions(X, bool(quick), bool(long))
     return pa_

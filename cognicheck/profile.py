@@ -542,6 +542,12 @@ def build_profile(
         tps = time_pressure_stats(all_dec)
         if tps:
             stats["time_pressure"] = tps
+    if all_dec:
+        from .capacity import capacity_stats
+
+        cap = capacity_stats(ds_all.X, ds_all.starts, ds_all.chosen, np.array([d.pa.load for d in all_dec if len(d.pa.moves) > 1]), np.array([d.pa.time_pressure for d in all_dec if len(d.pa.moves) > 1]))
+        if cap:
+            stats["capacity"] = cap
 
     return Profile(
         id=slugify(name),

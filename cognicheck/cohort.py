@@ -194,6 +194,46 @@ def _maia_player(pid: str, username: str) -> str:
     return pid
 
 
+def _memory_player(pid: str, username: str) -> str:
+    """Working-memory columns (engine-free) for one player, aligned with the stored rows.
+    Saves [allows_simple, allows_complex, focus_recent, focus_stale] per row and the
+    position load separately."""
+    from .features import MEMORY_FEATURES
+    from .profile import iter_decisions
+
+    out = ANALYSIS / f"{pid}.mem.npz"
+    if out.exists():
+        return pid
+    z = np.load(ANALYSIS / f"{pid}.npz")
+    games = games_of(parse_pgn((GAMES / f"{pid}.pgn").read_text()), username)
+    cols, loads = [], []
+    for gi, pg in enumerate(games):
+        for d in iter_decisions(pg, gi, None):
+            if len(d.pa.moves) > 1:
+                cols.append(d.pa.X[:, [IDX[f] for f in MEMORY_FEATURES]])
+                loads.append(d.pa.load)
+    M = np.concatenate(cols) if cols else np.zeros((0, len(MEMORY_FEATURES)), np.float32)
+    if len(M) != len(z["X"]):
+        raise RuntimeError(f"{pid}: memory rows {len(M)} != feature rows {len(z['X'])}")
+    np.savez_compressed(out, M=M.astype(np.float16), load=np.array(loads, np.float32))
+    return pid
+
+
+def memory_all(workers: int = 4) -> None:
+    players = json.loads(PLAYERS.read_text())
+    todo = [p for p in players if (ANALYSIS / f"{p['id']}.npz").exists() and not (ANALYSIS / f"{p['id']}.mem.npz").exists()]
+    t0 = time.time()
+    with ProcessPoolExecutor(workers) as ex:
+        futs = {ex.submit(_memory_player, p["id"], p["username"]): p for p in todo}
+        for i, f in enumerate(as_completed(futs), 1):
+            p = futs[f]
+            try:
+                f.result()
+                print(f"  memory {p['username']} ({i}/{len(todo)}, {time.time() - t0:.0f}s)", file=sys.stderr)
+            except Exception as e:
+                print(f"  FAILED {p['username']}: {e}", file=sys.stderr)
+
+
 def maia_all(workers: int = 4) -> None:
     players = json.loads(PLAYERS.read_text())
     todo = [p for p in players if (ANALYSIS / f"{p['id']}.npz").exists() and not (ANALYSIS / f"{p['id']}.maia.npy").exists()]
@@ -235,7 +275,22 @@ def _load_ds(pid: str) -> tuple[model.Dataset, np.ndarray]:
         if len(M) == len(X):
             X[:, IDX["maia_logp"]] = M[:, 0]
             X[:, IDX["maia_top"]] = M[:, 1]
+    mem = ANALYSIS / f"{pid}.mem.npz"
+    load = None
+    if mem.exists():
+        zm = np.load(mem)
+        M = zm["M"].astype(np.float64)
+        if len(M) == len(X):
+            from .features import LOAD_FEATURES, MEMORY_FEATURES
+
+            for j, f in enumerate(MEMORY_FEATURES):
+                X[:, IDX[f]] = M[:, j]
+            load = zm["load"].astype(np.float64)
+            per_row = np.repeat(load, np.diff(np.append(z["starts"], len(X))))
+            for f, base in LOAD_FEATURES.items():
+                X[:, IDX[f]] = per_row * X[:, IDX[base]]
     ds = model.Dataset(X, z["starts"], z["chosen"])
+    ds.load = load  # type: ignore[attr-defined]
     ds.code = z["code"] if "code" in z else None  # type: ignore[attr-defined]
     ds.tp = z["tp"] if "tp" in z else None  # type: ignore[attr-defined]
     ds.quick = z["quick"] if "quick" in z else None  # type: ignore[attr-defined]
@@ -390,6 +445,9 @@ def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: floa
     blind = extra["all"]["blind_spots"]
     blind["learned"] = learned_blind_spots(style)
     tp_stats = _time_pressure(ds)
+    from .capacity import capacity_stats
+
+    cap_stats = capacity_stats(ds.X, ds.starts, ds.chosen, getattr(ds, "load", None), getattr(ds, "tp", None))
     vectors = {k: cognition_vector(fits[k], prior, extra[k]["blind_spots"], _engine_stats(_subset(ds, masks[k]))) for k in fits}
     # Full profile for the web app (book + held-out games from the PGN).
     pgs = games_of(parse_pgn((GAMES / f"{p['id']}.pgn").read_text()), p["username"])
@@ -404,7 +462,7 @@ def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: floa
         style=style,
         evaluation=ev,
         heldout=[g.pgn() for i, g in enumerate(pgs) if i in hold],
-        stats={"games": n_games, "decisions": len(ds), "white_games": extra["white_games"], "black_games": n_games - extra["white_games"], "rating": p["rating"], "source": p.get("source", "lichess blitz")} | {k: round(v, 3) for k, v in _engine_stats(ds).items()} | ({"time_pressure": tp_stats} if tp_stats else {}),
+        stats={"games": n_games, "decisions": len(ds), "white_games": extra["white_games"], "black_games": n_games - extra["white_games"], "rating": p["rating"], "source": p.get("source", "lichess blitz")} | {k: round(v, 3) for k, v in _engine_stats(ds).items()} | ({"time_pressure": tp_stats} if tp_stats else {}) | ({"capacity": cap_stats} if cap_stats else {}),
         engine=True,
         habits={"table": table_all, "base_rate": base_all},
     )
@@ -529,6 +587,16 @@ def add_player(
 
 def _finish_add(entry, pid, username, depth, prior, step) -> dict:
     _analyse_player(pid, username, depth, progress=lambda i, n: step(f"analysing game {i}/{n}", 0.1 + 0.8 * i / n))
+    step("working-memory features", 0.9)
+    _memory_player(pid, username)
+    from .neural import available
+
+    if available():
+        step("Maia-2 prior", 0.91)
+        try:
+            _maia_player(pid, username)
+        except Exception:
+            pass
     step("fitting the personal model", 0.92)
     prof = fit_player(entry, prior)
     step("updating the cognition map", 0.97)

@@ -255,3 +255,40 @@ def test_neural_features_if_available():
     logp = pa.X[:, IDX["maia_logp"]]
     assert pa.X[:, IDX["maia_top"]].sum() == 1
     assert logp.max() <= 0 and logp[pa.index(chess.Move.from_uci("c5b4"))] > logp[pa.index(chess.Move.from_uci("a7a6"))]
+
+
+def test_working_memory_features():
+    from cognicheck.capacity import capacity_stats
+    from cognicheck.features import own_recency, refutation_complexity
+
+    b = chess.Board()
+    for u in ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "d2d3", "f8c5", "c1g5", "d7d6", "b1c3", "c8g4", "h2h3", "g4f3", "d1f3", "c6d4", "f3d1", "h7h6"):
+        b.push_uci(u)
+    pa = analyse_position(b)
+    last, k = own_recency(b, chess.WHITE)
+    assert k == 9 and last[chess.D1] == 9 and last[chess.G5] == 5 and chess.E2 not in last and last[chess.E4] == 1
+    # The three most recently moved white pieces: queen (d1), h-pawn (h3), knight (c3).
+    assert pa.X[pa.index(chess.Move.from_uci("c3d5")), IDX["focus_recent"]] == 1
+    assert pa.X[pa.index(chess.Move.from_uci("g5f6")), IDX["focus_recent"]] == 0
+    # The a-pawn was never touched in 9 own moves: stale.
+    assert pa.X[pa.index(chess.Move.from_uci("a2a3")), IDX["focus_stale"]] == 1
+    assert pa.X[pa.index(chess.Move.from_uci("c3d5")), IDX["focus_stale"]] == 0
+    assert 0 < pa.load <= 1
+    # Castling moves the rook too.
+    c = chess.Board()
+    for u in ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "e1g1", "d7d6"):
+        c.push_uci(u)
+    last_c, _ = own_recency(c, chess.WHITE)
+    assert last_c[chess.F1] == 4 and last_c[chess.G1] == 4 and chess.H1 not in last_c
+    # A piece simply left hanging is a 2-piece tactic; a capture that also forks involves more.
+    simple = chess.Board("4k3/8/8/8/8/8/8/R2r2K1 w - - 0 1")
+    assert refutation_complexity(simple, chess.Move.from_uci("a1d1")) == 2
+    forking = chess.Board("4k3/8/8/8/8/8/2p5/R3K1Q1 b - - 0 1")  # ...cxb1=N would fork? use a knight capture: Nxc2 forking a1 and e1
+    forking = chess.Board("4k3/8/8/8/3n4/8/2P5/R3K3 b - - 0 1")
+    assert refutation_complexity(forking, chess.Move.from_uci("d4c2")) >= 3
+    # capacity_stats on a tiny synthetic dataset
+    X = np.zeros((6, len(FEATURE_NAMES)))
+    X[0, IDX["allows_simple"]] = 1
+    X[3, IDX["focus_recent"]] = 1
+    out = capacity_stats(X, np.array([0, 3]), np.array([0, 3]), np.array([0.2, 0.7]), np.array([False, True]))
+    assert out["complexity"]["simple"]["walked_in"] == 1 and out["recent"]["chosen_share"] == 0.5

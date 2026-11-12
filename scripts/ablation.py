@@ -20,6 +20,7 @@ FAMILIES = {
     "no think time": ["quick_habit", "quick_eng_loss", "quick_capture", "long_eng_loss", "long_quiet"],
     "no attention": ["attn_opp", "attn_own", "reacts_harmless"],
     "no plan persistence": ["same_plan"],
+    "no working memory": ["allows_simple", "allows_complex", "load_eng_loss", "load_hangs", "focus_recent", "focus_stale"],
     "no rating-band prior": [],  # handled below: evaluate against the global prior instead
 }
 players = [p for p in json.loads(cohort.PLAYERS.read_text()) if (cohort.ANALYSIS / f"{p['id']}.npz").exists()]

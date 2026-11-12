@@ -133,6 +133,12 @@ def print_profile(prof):
     for r in prof.blind_spots.get("rows", [])[:8]:
         print(f"  {r['label']:55s} index {r['index']:.2f}  ({r['missed']}/{r['events']})")
     print("Combined motif index:", json.dumps(dict(sorted(prof.blind_spots.get("motif_index", {}).items(), key=lambda kv: -kv[1])[:6])))
+    if prof.stats.get("capacity"):
+        from .capacity import capacity_summary
+
+        print("Working memory:")
+        for line in capacity_summary(prof.stats["capacity"]):
+            print(f"  {line}")
     if prof.refutations.get("rows"):
         print(f"Engine: what punishes the blunders ({prof.refutations['blunders']} blunders):")
         for r in prof.refutations["rows"][:5]:
@@ -148,6 +154,8 @@ def cmd_cohort(args):
         cohort.fetch_games(args.games)
     if args.stage in ("analyse", "all"):
         cohort.analyse_all(workers=args.workers, depth=args.depth)
+    if args.stage in ("memory", "all"):
+        cohort.memory_all(workers=args.workers)
     if args.stage in ("maia", "all"):
         from .neural import available
 
@@ -207,7 +215,7 @@ def main(argv=None):
     li.set_defaults(func=cmd_lichess)
 
     co = sub.add_parser("cohort", help="profile many real Lichess players and run the PCA")
-    co.add_argument("stage", choices=["select", "fetch", "analyse", "maia", "fit", "pca", "all"])
+    co.add_argument("stage", choices=["select", "fetch", "analyse", "memory", "maia", "fit", "pca", "all"])
     co.add_argument("--per-bin", type=int, default=9, help="players per rating band")
     co.add_argument("--min-games", type=int, default=400, help="minimum rated blitz games on Lichess")
     co.add_argument("--games", type=int, default=200, help="games to download per player")
