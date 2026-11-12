@@ -359,6 +359,32 @@ is *when and how* a player goes wrong, the least regular part of human play. **T
 makes people unpredictable**: moves played in under three seconds are hit 62 %, moves
 after a long think 31 %. Top-3 is above 80 % in every phase already.
 
+### What did not move the needle (v6): predicting the mistakes
+
+Blunders are part of the target: the game asks for the move the player will make, not
+the best one. On the frozen test games the v5 model predicts engine-best moves at 76 %
+and blunders at 24 %, and Maia-2 alone does *better* on blunders (27 %). Four attempts to
+close that gap, all on the same split:
+
+| Attempt | Top-1 all moves | Top-1 on blunders | Log-loss |
+|---|---|---|---|
+| v5 (head + book) | 55.2% | 24.1% | 1.377 |
+| + trap features: greedy capture, attacking move that hangs, moved vs. other piece en prise | 55.3% | 24.2% | 1.381 |
+| + game state: care when behind / ahead / right after losing material | (same run) | | |
+| + refutation motifs: what the Stockfish refutation of the played move looks like (quiet, check, fork, knight, …) | 55.4% | 24.7% | 1.381 |
+| two-mode mixture: "sees the danger" vs. "plays blind", blindness depending on clock and crowding | fitted blindness 1–5 %, no gain | | |
+
+All of these read well in a profile (38 players have a reliable "overlooks refutations by
+…" trait; everyone finds quiet refutations and forks hardest), but none predicts better.
+The reason is consistent across the four: Maia-2 already prices how tempting a bad move
+is. What is left to learn is *when a particular player stops seeing*, and 200 games
+contain about 70 blunders per player, too few to learn that per person. The ablation
+agrees: with the Maia prior in place, no hand-made family is worth more than 0.3 points.
+
+Conclusion for anyone chasing accuracy with this design: the feature road is exhausted
+at this data size. The remaining levers are **more games per player** and **a model that
+sees the whole game and clock**, both measured next on the same frozen test games.
+
 ### Working memory (v4)
 
 Chess cognition research puts a player's working memory at roughly 3–5 "chunks". We
