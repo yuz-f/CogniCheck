@@ -188,12 +188,12 @@ The study run behind the numbers below:
 - **Cohort:** 81 Lichess blitz players rated 812–2929. 72 were sampled evenly across
   rating bands from recent arenas, plus 9 from the blitz leaderboard. Each had 400+ rated
   blitz games on Lichess.
-- **Games:** 75 recent rated blitz games per player, about 48,600 decisions in total,
-  analysed with Stockfish at depth 5.
+- **Games:** 200 recent rated blitz games per player (v3 onwards; 75 in v1/v2), about
+  130,000 decisions in total, analysed with Stockfish at depth 5 plus Maia-2.
 - **Prior:** the population prior is trained on the pooled real games, with an equal
   number of positions from every player.
-- **Cognition vector:** 48 numbers per player: 30 style deviations from the population,
-  15 blind-spot indices (log) and 3 accuracy stats.
+- **Cognition vector:** 79 numbers per player: style deviations from the population
+  (one per non-strength feature), blind-spot indices (log) and accuracy stats.
 - **Rating removed:** rating is regressed out of the vector before PCA. Without this,
   the first axis is just strength: raw engine match correlates r = 0.92 with rating.
 - **Validity check:** each player is profiled twice more, from two disjoint halves of
@@ -304,6 +304,40 @@ threatened nothing") loads on PC6.
 On the synthetic personas, the model-learned blind spots rank the planted one
 first for Kai (knight ×1.21, reliable) and Sasha (backward moves ×1.66, reliable);
 for Tomas the long-range weight is first but not beyond noise.
+
+### Accuracy first (v5): opening book and a non-linear head
+
+Two changes aimed purely at prediction, measured on the same 82 players and the same
+held-out games (each player's **most recent** 15 % of games, so the split is
+time-ordered and nothing from later games leaks into the model):
+
+| Model | Top-1 | Log-loss | Beats rating-matched average player |
+|---|---|---|---|
+| Linear personal model (v3/v4) | 50.8% | 1.560 | 57 / 82 |
+| + player's opening book | 54.0% | 1.449 | |
+| + non-linear head, no book | 53.9% | 1.417 | |
+| **+ both (v5, the model now used)** | **55.2%** | **1.377** | **82 / 82** |
+| Rating-matched average player | 50.4% | 1.580 | |
+| Stockfish top move | 34.7% | | |
+
+- **Opening book.** The player's own move counts in positions they have had before
+  (first 24 plies), blended with the model as a Dirichlet prior (pseudo-count 2). On real
+  players this is worth +3 points on its own; depth beyond 20 plies adds nothing.
+- **Non-linear head** (`cognicheck/head.py`). score = *w·x* + *g(x)*, where *w* is the
+  linear model above, kept fixed, and *g* is a small MLP (79 → 32 → 32 → 1, tanh) that
+  learns interactions between the features. It is pre-trained on the pooled cohort
+  positions and fine-tuned per player with early stopping on the player's last training
+  games. Pre-training matters: fine-tuned from scratch it gains ~2 points, from the
+  population head ~3.5, most for weaker players. Training needs torch; prediction is
+  plain numpy, so profiles with a head run anywhere.
+- **Explainability is kept, not traded.** The traits, standard errors, blind spots and
+  the PCA all come from the fixed linear part. In a move explanation the head shows up as
+  one extra term, "fits / breaks a pattern this player follows (non-linear)", so you can
+  see when the prediction rests on something the linear terms cannot express.
+- Tried and dropped: Maia-2 queried at rating ±400 as extra features (no gain).
+
+For scale, published human-move predictors on Lichess blitz: Maia 1 ≈ 50–53 %,
+Maia-2 ≈ 53–55 %, Maia personalised per player on thousands of games ≈ 55–60 %.
 
 ### Working memory (v4)
 
