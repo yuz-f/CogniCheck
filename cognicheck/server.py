@@ -74,6 +74,8 @@ class PredictRequest(BaseModel):
     fen: Optional[str] = None
     moves: List[str] = []
     top_k: int = 5
+    think_seconds: Optional[float] = None  # how long the player has been thinking (live) or took
+    time_left: Optional[float] = None
 
 
 class GameRequest(BaseModel):
@@ -247,7 +249,7 @@ def predict(req: PredictRequest):
             board.push_uci(u)
     except ValueError as e:
         raise HTTPException(400, f"bad position: {e}")
-    return pred.predict(board, top_k=req.top_k)
+    return pred.predict(board, top_k=req.top_k, think_time=req.think_seconds, time_left=req.time_left)
 
 
 @app.post("/api/position")

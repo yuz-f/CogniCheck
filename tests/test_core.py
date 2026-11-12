@@ -211,3 +211,31 @@ def test_plans_in_the_opening_are_not_attacks():
     i = pa.index(chess.Move.from_uci("f1c4"))
     assert _plan_of(pa.X[i], pa.phase) == "develop"
     assert pa.X[pa.index(chess.Move.from_uci("d2d4")), IDX["pawn_storm"]] == 0
+
+
+def test_attention_and_plan_persistence_features():
+    from cognicheck.features import previous_plan
+
+    b = chess.Board()
+    for u in ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "d2d3"):
+        b.push_uci(u)
+    pa = analyse_position(b, prev_plan=previous_plan(b))
+    # Black's previous move Nf6 was development; so is Bc5 now, so same_plan fires.
+    assert pa.prev_plan == "develop"
+    assert pa.X[pa.index(chess.Move.from_uci("f8c5")), IDX["same_plan"]] == 1
+    # Moves to the d-file area, where White just played d3, pick up opponent attention.
+    assert pa.X[pa.index(chess.Move.from_uci("d7d5")), IDX["attn_opp"]] > pa.X[pa.index(chess.Move.from_uci("a7a6")), IDX["attn_opp"]]
+    # d3 threatened nothing, so reacting there counts as attention capture.
+    assert pa.X[pa.index(chess.Move.from_uci("d7d5")), IDX["reacts_harmless"]] == 1
+
+
+def test_think_time_interactions():
+    from cognicheck.features import fill_time_interactions
+
+    b = chess.Board("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3")
+    quick = analyse_position(b, think_time=1.0)
+    slow = analyse_position(b, think_time=30.0)
+    assert quick.quick and not quick.long and slow.long
+    i = quick.index(chess.Move.from_uci("f3e5"))
+    assert quick.X[i, IDX["quick_capture"]] == 1 and slow.X[i, IDX["quick_capture"]] == 0
+    assert slow.X[quick.index(chess.Move.from_uci("b1c3")), IDX["long_quiet"]] == 1

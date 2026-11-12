@@ -32,7 +32,9 @@ import chess
 import numpy as np
 
 from . import model, tactics
-from .features import FEATURE_LABEL, FEATURE_NAMES, IDX, build_habits, habit_values
+from .features import FEATURE_LABEL, FEATURE_NAMES, IDX, build_habits, fill_time_interactions, habit_values
+
+RATING_BANDS = [(0, 1400), (1400, 1800), (1800, 2200), (2200, 9999)]
 from .ingest import USER_AGENT, games_of, parse_pgn
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -154,6 +156,8 @@ def _analyse_player(pid: str, username: str, depth: int, progress=None) -> str:
     game_of = np.array([d.game_index for d in decisions if len(d.pa.moves) > 1])
     codes = np.concatenate([d.pa.codes for d in decisions if len(d.pa.moves) > 1]) if decisions else np.zeros(0, np.int16)
     tp_of = np.array([d.pa.time_pressure for d in decisions if len(d.pa.moves) > 1], dtype=bool)
+    quick_of = np.array([d.pa.quick for d in decisions if len(d.pa.moves) > 1], dtype=bool)
+    long_of = np.array([d.pa.long for d in decisions if len(d.pa.moves) > 1], dtype=bool)
     halves = {
         "all": decisions,
         "A": [d for d in decisions if d.game_index % 2 == 0],
@@ -162,7 +166,7 @@ def _analyse_player(pid: str, username: str, depth: int, progress=None) -> str:
     extra = {k: {"blind_spots": blind_spot_stats(v), "refutations": engine_refutations(v)} for k, v in halves.items()}
     extra["games"] = len(games)
     extra["white_games"] = sum(g.color == chess.WHITE for g in games)
-    np.savez_compressed(out, X=ds.X.astype(np.float16), starts=ds.starts, chosen=ds.chosen, game=game_of, code=codes, tp=tp_of)
+    np.savez_compressed(out, X=ds.X.astype(np.float16), starts=ds.starts, chosen=ds.chosen, game=game_of, code=codes, tp=tp_of, quick=quick_of, long=long_of)
     (ANALYSIS / f"{pid}.json").write_text(json.dumps(extra))
     return pid
 
@@ -189,6 +193,8 @@ def _load_ds(pid: str) -> tuple[model.Dataset, np.ndarray]:
     ds = model.Dataset(z["X"].astype(np.float64), z["starts"], z["chosen"])
     ds.code = z["code"] if "code" in z else None  # type: ignore[attr-defined]
     ds.tp = z["tp"] if "tp" in z else None  # type: ignore[attr-defined]
+    ds.quick = z["quick"] if "quick" in z else None  # type: ignore[attr-defined]
+    ds.long = z["long"] if "long" in z else None  # type: ignore[attr-defined]
     return ds, z["game"]
 
 
@@ -202,8 +208,12 @@ def _fill_habits(ds: model.Dataset, from_mask: np.ndarray) -> tuple[dict, float]
     ends = np.append(ds.starts[1:], len(ds.X))
     pos = [(codes[s:e], int(c - s)) for s, e, c, m in zip(ds.starts, ends, ds.chosen, from_mask) if m]
     table, base = build_habits(pos)
-    for s_, e, c, m in zip(ds.starts, ends, ds.chosen, from_mask):
+    quick = getattr(ds, "quick", None)
+    long_ = getattr(ds, "long", None)
+    for k, (s_, e, c, m) in enumerate(zip(ds.starts, ends, ds.chosen, from_mask)):
         ds.X[s_:e, IDX["habit"]] = habit_values(codes[s_:e], table, base, int(c - s_) if m else None)
+        if quick is not None:
+            fill_time_interactions(ds.X[s_:e], bool(quick[k]), bool(long_[k]))
     return table, base
 
 
@@ -235,34 +245,77 @@ def _engine_stats(ds: model.Dataset) -> dict:
     return {"engine_match": float((loss <= 0.1).mean()), "avg_loss_pawns": float(loss.mean()), "blunder_rate": float((loss >= 2).mean())}
 
 
+def band_of(rating: float | None) -> int:
+    if rating is None:
+        return -1
+    for i, (lo, hi) in enumerate(RATING_BANDS):
+        if lo <= rating < hi:
+            return i
+    return len(RATING_BANDS) - 1
+
+
+def _pool(samples) -> model.Dataset:
+    return model.Dataset.from_positions([(d.X[s:e], int(c - s)) for d in samples for s, e, c in zip(d.starts, np.append(d.starts[1:], len(d.X)), d.chosen)])
+
+
 def train_population(players: list[dict]) -> np.ndarray:
-    """Population prior: an equal number of positions from every player."""
+    """Population priors: one global and one per rating band (shrunk to the global).
+
+    An equal number of positions from every player, so strong players do not
+    dominate just because they have more decisions per game.
+    """
     rng = np.random.default_rng(0)
-    pooled = []
+    pooled, bands = [], {i: [] for i in range(len(RATING_BANDS))}
     for p in players:
         ds, _ = _load_ds(p["id"])
         _fill_habits(ds, np.ones(len(ds), bool))
-        idx = rng.choice(len(ds), size=min(600, len(ds)), replace=False)
-        pooled.append(_subset(ds, np.isin(np.arange(len(ds)), idx)))
-    big = model.Dataset.from_positions([(d.X[s:e], int(c - s)) for d in pooled for s, e, c in zip(d.starts, np.append(d.starts[1:], len(d.X)), d.chosen)])
+        idx = rng.choice(len(ds), size=min(800, len(ds)), replace=False)
+        sub = _subset(ds, np.isin(np.arange(len(ds)), idx))
+        pooled.append(sub)
+        bands[band_of(p["rating"])].append(sub)
+    big = _pool(pooled)
     prior = model.fit(big, lam=1e-3)
-    POPULATION_REAL.write_text(json.dumps({"feature_names": FEATURE_NAMES, "weights": [float(x) for x in prior], "positions": len(big), "players": len(players)}, indent=1))
-    print(f"population prior from {len(big)} positions of {len(players)} players", file=sys.stderr)
+    out = {"feature_names": FEATURE_NAMES, "weights": [float(x) for x in prior], "positions": len(big), "players": len(players), "bands": []}
+    for i, (lo, hi) in enumerate(RATING_BANDS):
+        if bands[i]:
+            bd = _pool(bands[i])
+            w = model.fit(bd, prior=prior, lam=0.01)
+        else:
+            bd, w = None, prior
+        out["bands"].append({"lo": lo, "hi": hi, "players": len(bands[i]), "positions": len(bd) if bd else 0, "weights": [float(x) for x in w]})
+    POPULATION_REAL.write_text(json.dumps(out, indent=1))
+    print(f"population prior from {len(big)} positions of {len(players)} players, {len(RATING_BANDS)} rating bands", file=sys.stderr)
     return prior
 
 
-def load_population() -> np.ndarray:
+def load_population(rating: float | None = None) -> np.ndarray:
+    """Global prior, or the prior of the rating band when ``rating`` is given."""
     if not POPULATION_REAL.exists():
         raise RuntimeError("no real-player population yet - run: python -m cognicheck cohort all")
-    from .profile import load_prior
-
-    return load_prior(POPULATION_REAL)
+    d = json.loads(POPULATION_REAL.read_text())
+    names = d["feature_names"]
+    vec = d["weights"]
+    if rating is not None and d.get("bands"):
+        b = band_of(rating)
+        if 0 <= b < len(d["bands"]):
+            vec = d["bands"][b]["weights"]
+    m = dict(zip(names, vec))
+    return np.array([m.get(f, 0.0) for f in FEATURE_NAMES])
 
 
 def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: float = 0.15):
-    """Personal model (all games + two halves), evaluation, profile and cognition vector."""
+    """Personal model (all games + two halves), evaluation, profile and cognition vector.
+
+    ``prior`` is the global prior; the player's rating band prior is used as the
+    actual shrinkage target when bands exist.
+    """
     from .profile import Profile, build_book, learned_blind_spots, slugify, style_summary
 
+    global_prior = prior
+    try:
+        prior = load_population(p.get("rating"))
+    except RuntimeError:
+        pass
     ds, game = _load_ds(p["id"])
     extra = json.loads((ANALYSIS / f"{p['id']}.json").read_text())
     n_games = extra["games"]
@@ -273,7 +326,8 @@ def fit_player(p: dict, prior: np.ndarray, lam: float = 0.01, holdout_frac: floa
     w_eval = model.fit(ds_train, prior=prior, lam=lam)
     ev = {
         "personal": model.evaluate(ds_test, w_eval),
-        "population": model.evaluate(ds_test, prior),
+        "population": model.evaluate(ds_test, prior),  # rating-band prior
+        "population_global": model.evaluate(ds_test, global_prior),
     }
     loss_test = ds_test.X[:, IDX["eng_loss"]]
     ends = np.append(ds_test.starts[1:], len(ds_test.X))
@@ -357,7 +411,7 @@ def add_player(
     pgn: str | None = None,
     player: str | None = None,
     rating: int | None = None,
-    n_games: int = 75,
+    n_games: int = 100,
     depth: int = 5,
     progress=None,
 ) -> dict:

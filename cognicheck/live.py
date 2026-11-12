@@ -200,6 +200,7 @@ class LivePrediction:
     p_actual: float | None = None
     model_hit: bool | None = None
     user_hit: bool | None = None
+    updates: int = 0  # re-predictions made while the player was thinking
 
 
 @dataclass
@@ -270,7 +271,7 @@ class LiveSession:
             "history": self.history,
             "clock": self.clock,
             "result": self.result,
-            "pending": None if pend is None else {"ply": pend.ply, "prediction": pend.prediction, "guess": pend.guess, "made_at": pend.made_at},
+            "pending": None if pend is None else {"ply": pend.ply, "prediction": pend.prediction, "guess": pend.guess, "made_at": pend.made_at, "updates": pend.updates, "thinking_for": round(time.time() - pend.made_at, 1)},
             "last": None if last is None else {k: getattr(last, k) for k in ("ply", "actual", "actual_san", "guess", "p_actual", "model_hit", "user_hit")} | {"model_top": last.prediction["moves"][0]["san"] if last.prediction["moves"] else None, "perspective": last.prediction.get("perspective")},
             "score": {
                 "predicted": len(done),
@@ -299,11 +300,40 @@ class LiveSession:
         return [p.__dict__ | {"prediction": {"moves": p.prediction["moves"][:3]}} for p in self.predictions]
 
     # --------------------------------------------------------------- loop
+    def _time_left(self) -> float | None:
+        if not self.clock:
+            return None
+        v = self.clock.get("white" if self.color == chess.WHITE else "black")
+        return float(v) if v is not None else None
+
     def _maybe_predict(self) -> None:
         if self._predictor is None or self.board.is_game_over() or self.board.turn != self.color:
             return
-        pred = self._predictor.predict(self.board.copy())
-        self.predictions.append(LivePrediction(ply=len(self.board.move_stack), fen=self.board.fen(), made_at=time.time(), prediction=pred))
+        pred = self._predictor.predict(self.board.copy(), think_time=0.0, time_left=self._time_left())
+        lp = LivePrediction(ply=len(self.board.move_stack), fen=self.board.fen(), made_at=time.time(), prediction=pred)
+        self.predictions.append(lp)
+        # Re-predict once the player has clearly been thinking for a while: habits
+        # weigh less and calculation more. Each update is timestamped too.
+        threading.Thread(target=self._rethink, args=(lp,), daemon=True).start()
+
+    def _rethink(self, lp: "LivePrediction") -> None:
+        from .features import LONG_SECONDS, QUICK_SECONDS
+
+        for wait in (QUICK_SECONDS + 0.5, LONG_SECONDS + 0.5):
+            while time.time() - lp.made_at < wait:
+                time.sleep(0.25)
+                if lp.actual is not None or self.status != "live":
+                    return
+            with self._lock:
+                if lp.actual is not None or self.pending is not lp:
+                    return
+                board = self.board.copy()
+            pred = self._predictor.predict(board, think_time=time.time() - lp.made_at, time_left=self._time_left())
+            with self._lock:
+                if lp.actual is None:
+                    lp.prediction = pred
+                    lp.updates = getattr(lp, "updates", 0) + 1
+            self._publish()
 
     def _apply_move(self, uci: str, clock: dict | None) -> None:
         mv = chess.Move.from_uci(uci)

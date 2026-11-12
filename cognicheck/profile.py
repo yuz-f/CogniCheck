@@ -26,7 +26,7 @@ import numpy as np
 
 from . import model, tactics
 from .engine import Engine
-from .features import ALLOW_MOTIFS, FEATURE_LABEL, FEATURE_NAMES, IDX, PositionAnalysis, addresses_threat, analyse_position, build_habits, habit_values
+from .features import ALLOW_MOTIFS, FEATURE_LABEL, FEATURE_NAMES, IDX, PositionAnalysis, addresses_threat, analyse_position, build_habits, fill_time_interactions, habit_values, plan_of
 from .ingest import PlayerGame
 
 BOOK_PLIES = 24
@@ -62,20 +62,33 @@ def base_time(time_control: str | None) -> float | None:
         return None
 
 
+def increment(time_control: str | None) -> float:
+    try:
+        return float(time_control.split("+")[1]) if time_control and "+" in time_control else 0.0
+    except ValueError:
+        return 0.0
+
+
 def iter_decisions(pg: PlayerGame, game_index: int, engine: Engine | None, max_plies: int = 200):
     board = pg.game.board()
-    base = base_time(pg.game.headers.get("TimeControl"))
+    tc = pg.game.headers.get("TimeControl")
+    base, inc = base_time(tc), increment(tc)
     my_clock = None  # seconds left after the player's previous move
+    prev_plan = None  # plan of the player's previous move
     for ply, node in enumerate(pg.game.mainline()):
         move = node.move
         if ply >= max_plies:
             break
         if board.turn == pg.color and board.legal_moves.count() > 1:
-            pa = analyse_position(board, engine, time_left=my_clock, base_time=base)
+            # Time spent on this move (known after the fact; in live mode it is the elapsed time).
+            c_after = node.clock()
+            think = (my_clock + inc - c_after) if (my_clock is not None and c_after is not None) else None
+            pa = analyse_position(board, engine, time_left=my_clock, base_time=base, think_time=think, prev_plan=prev_plan)
             try:
                 idx = pa.index(move)
             except ValueError:
                 break
+            prev_plan = plan_of(pa.X[idx], pa.phase, pa.threat_gain)
             yield Decision(pa, idx, game_index, ply)
         if board.turn == pg.color:
             c = node.clock()
@@ -88,6 +101,7 @@ def fill_habits(decisions: list["Decision"], table: dict, base_rate: float, loo:
     """Write the habit feature into each decision's feature matrix."""
     for d in decisions:
         d.pa.X[:, IDX["habit"]] = habit_values(d.pa.codes, table, base_rate, d.chosen if loo else None)
+        fill_time_interactions(d.pa.X, d.pa.quick, d.pa.long)
 
 
 class _Tally:

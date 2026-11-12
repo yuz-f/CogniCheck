@@ -6,7 +6,7 @@ import numpy as np
 
 from . import tactics
 from .engine import Engine
-from .features import ENGINE_FEATURES, FEATURE_LABEL, FEATURE_NAMES, IDX, PositionAnalysis, analyse_position, habit_values
+from .features import ENGINE_FEATURES, FEATURE_LABEL, FEATURE_NAMES, IDX, PLAN_LABEL, PLANS, PositionAnalysis, analyse_position, habit_values, plan_of as _plan_of, previous_plan
 
 # Collinear feature families are explained as one line.
 REASON_GROUPS = {
@@ -18,43 +18,6 @@ _GROUP_OF = {f: g for g, (fs, _, _) in REASON_GROUPS.items() for f in fs}
 from .model import softmax
 
 BOOK_ALPHA = 2.0  # pseudo-count of the model inside the opening book
-
-PLANS = [
-    ("mate", "go for mate"),
-    ("attack", "attack the king"),
-    ("grab", "win material"),
-    ("defend", "defend / save a piece"),
-    ("trade", "trade pieces"),
-    ("develop", "develop & castle"),
-    ("pawns", "push pawns / gain space"),
-    ("manoeuvre", "reposition pieces"),
-]
-PLAN_LABEL = dict(PLANS)
-
-
-def _plan_of(x: np.ndarray, phase: str = "middlegame", threat_gain: int = 0) -> str:
-    """Read an intention off a move's features. Order matters: the most
-    specific reading wins, and in the opening development beats 'attack'.
-    Parrying a mere pawn threat with a developing move reads as development."""
-    if x[IDX["mate"]]:
-        return "mate"
-    develops = x[IDX["develops"]] or x[IDX["castle"]]
-    if x[IDX["saves"]] > 0 and (threat_gain >= 2 or not develops):
-        return "defend"
-    if x[IDX["capture_gain"]] > 0:
-        return "grab"
-    if x[IDX["equal_trade"]]:
-        return "trade"
-    if phase == "opening" and develops:
-        return "develop"
-    if x[IDX["check"]] or x[IDX["pawn_storm"]] or x[IDX["near_king"]]:
-        return "attack"
-    if develops:
-        return "develop"
-    if x[IDX["pawn_move"]]:
-        return "pawns"
-    return "manoeuvre"
-
 
 class Predictor:
     def __init__(self, profile, engine: Engine | None = None):
@@ -86,11 +49,14 @@ class Predictor:
             p = (c + BOOK_ALPHA * p) / (total + BOOK_ALPHA)
         return p
 
-    def analyse(self, board: chess.Board) -> PositionAnalysis:
-        pa = analyse_position(board, self.engine)
+    def analyse(self, board: chess.Board, think_time: float | None = None, time_left: float | None = None) -> PositionAnalysis:
+        from .features import fill_time_interactions
+
+        pa = analyse_position(board, self.engine, time_left=time_left, think_time=think_time, prev_plan=previous_plan(board))
         table = self.habits.get("table")
         if table:
             pa.X[:, IDX["habit"]] = habit_values(pa.codes, table, self.habits.get("base_rate", 0.0))
+        fill_time_interactions(pa.X, pa.quick, pa.long)
         return pa
 
     # ------------------------------------------------------------- explain
@@ -237,7 +203,12 @@ class Predictor:
 
         # Narrative.
         if plan_rows:
-            notes.append(f"Most likely intention: {plan_rows[0]['label']} ({plan_rows[0]['p']:.0%}).")
+            cont = " - continuing the previous plan" if pa.prev_plan == plan_rows[0]["plan"] else (f" - switching from '{PLAN_LABEL.get(pa.prev_plan, pa.prev_plan)}'" if pa.prev_plan else "")
+            notes.append(f"Most likely intention: {plan_rows[0]['label']} ({plan_rows[0]['p']:.0%}){cont}.")
+        if pa.quick:
+            notes.append("Played quickly: habit and reflex weigh more than calculation.")
+        elif pa.long:
+            notes.append("After a long think: calculation weighs more, habits less.")
         for t in threats:
             if t["p_notice"] < 0.5:
                 why = f" - {t['blind_label']} are a blind spot for this player" if t["blind_label"] and t["blind_index"] >= 1.15 else ""
@@ -274,11 +245,13 @@ class Predictor:
             "evaluation": perceived,
             "notes": notes,
             "phase": pa.phase,
+            "previous_plan": pa.prev_plan,
+            "think": "quick" if pa.quick else "long" if pa.long else None,
         }
 
     # ---------------------------------------------------------------- API
-    def predict(self, board: chess.Board, top_k: int = 5, pa: PositionAnalysis | None = None) -> dict:
-        pa = pa or self.analyse(board)
+    def predict(self, board: chess.Board, top_k: int = 5, pa: PositionAnalysis | None = None, think_time: float | None = None, time_left: float | None = None) -> dict:
+        pa = pa or self.analyse(board, think_time=think_time, time_left=time_left)
         if not pa.moves:
             return {"moves": [], "perspective": None, "game_over": True}
         probs = self.distribution(pa)

@@ -479,7 +479,7 @@ const live = {
     let status;
     if (s.status === "error") status = `Error: ${s.error}`;
     else if (s.status === "finished") status = `Game over ${s.result || ""}. Model predicted ${sc.model_hits}/${sc.predicted} moves exactly (${sc.model_top3} in its top 3); you got ${sc.user_hits}/${sc.user_guesses}.`;
-    else if (pend) status = pend.guess ? `Guess locked: ${pend.guess}. Waiting for ${s.player}…` : `${s.player} is thinking. Click your guess on the board.`;
+    else if (pend) status = (pend.guess ? `Guess locked: ${pend.guess}. Waiting for ${s.player}…` : `${s.player} is thinking. Click your guess on the board.`) + (pend.updates ? ` (prediction updated after ${pend.thinking_for}s of thinking)` : "");
     else status = s.status === "live" ? "Opponent to move…" : s.status;
     $("#lv-status").textContent = status;
     $("#lv-setup").classList.toggle("hidden", s.status === "live");

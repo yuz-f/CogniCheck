@@ -203,7 +203,7 @@ def main(argv=None):
     co.add_argument("stage", choices=["select", "fetch", "analyse", "fit", "pca", "all"])
     co.add_argument("--per-bin", type=int, default=9, help="players per rating band")
     co.add_argument("--min-games", type=int, default=400, help="minimum rated blitz games on Lichess")
-    co.add_argument("--games", type=int, default=60, help="games to download per player")
+    co.add_argument("--games", type=int, default=200, help="games to download per player")
     co.add_argument("--workers", type=int, default=4)
     co.add_argument("--depth", type=int, default=5)
     co.set_defaults(func=cmd_cohort)

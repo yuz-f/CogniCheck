@@ -66,14 +66,42 @@ FEATURES: list[tuple[str, str]] = [
     ("tp_hangs", "leaves material en prise, when short of time"),
     ("tp_capture", "captures, when short of time"),
     ("habit", "a move this player habitually makes (piece and square)"),
+    ("mobility_gain", "gains mobility for the moved piece"),
+    ("passed_pawn", "creates or advances a passed pawn"),
+    ("opens_file", "opens a file for a rook or queen"),
+    ("attacks_weak_pawn", "attacks an undefended pawn"),
+    ("weakens_shield", "moves a pawn in front of the own king"),
+    ("isolates_pawn", "leaves a pawn isolated"),
+    ("quick_habit", "habitual move, played quickly"),
+    ("quick_eng_loss", "objective loss, played quickly"),
+    ("quick_capture", "capture, played quickly"),
+    ("long_eng_loss", "objective loss, after a long think"),
+    ("long_quiet", "quiet move, after a long think"),
+    ("attn_opp", "goes where the opponent has just been active"),
+    ("attn_own", "goes where the player has just been active"),
+    ("reacts_harmless", "answers the opponent's last move although it threatened nothing"),
+    ("same_plan", "continues the player's previous plan"),
 ]
+PLANS = [
+    ("mate", "go for mate"),
+    ("attack", "attack the king"),
+    ("grab", "win material"),
+    ("defend", "defend / save a piece"),
+    ("trade", "trade pieces"),
+    ("develop", "develop & castle"),
+    ("pawns", "push pawns / gain space"),
+    ("manoeuvre", "reposition pieces"),
+]
+PLAN_LABEL = dict(PLANS)
+QUICK_SECONDS = 3.0
+LONG_SECONDS = 15.0
 ALLOW_MOTIFS = ["knight", "bishop", "rook", "queen", "pawn", "check", "fork", "discovered", "backward", "long_range"]
 TIME_PRESSURE_SECONDS = 20
 HABIT_ALPHA = 2.0
 FEATURE_NAMES = [f for f, _ in FEATURES]
 FEATURE_LABEL = dict(FEATURES)
 IDX = {f: i for i, f in enumerate(FEATURE_NAMES)}
-ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss"}
+ENGINE_FEATURES = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "quick_eng_loss", "long_eng_loss"}
 D = len(FEATURE_NAMES)
 
 PIECE_FEATURE = {
@@ -128,6 +156,9 @@ class PositionAnalysis:
     phase: str = "middlegame"
     codes: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int16))  # (piece, to-square) per move
     time_pressure: bool = False
+    quick: bool = False  # the move was (or is being) played within QUICK_SECONDS
+    long: bool = False
+    prev_plan: str | None = None
 
     def index(self, move: chess.Move) -> int:
         return self.moves.index(move)
@@ -181,7 +212,99 @@ def build_habits(positions) -> tuple[dict, float]:
     return table, (chosen / avail if avail else 0.0)
 
 
-def analyse_position(board: chess.Board, engine: Engine | None = None, time_left: float | None = None, base_time: float | None = None) -> PositionAnalysis:
+def _last_was_capture(board: chess.Board) -> bool:
+    mv = board.move_stack[-1]
+    b = board.copy()
+    b.pop()
+    return b.is_capture(mv)
+
+
+def _is_passed(board: chess.Board, sq: chess.Square, color: chess.Color) -> bool:
+    f, r = chess.square_file(sq), chess.square_rank(sq)
+    ranks = range(r + 1, 8) if color == chess.WHITE else range(0, r)
+    for ff in (f - 1, f, f + 1):
+        if 0 <= ff < 8:
+            for rr in ranks:
+                p = board.piece_at(chess.square(ff, rr))
+                if p and p.piece_type == chess.PAWN and p.color != color:
+                    return False
+    return True
+
+
+def _is_isolated(board: chess.Board, sq: chess.Square, color: chess.Color) -> bool:
+    f = chess.square_file(sq)
+    own = board.pieces(chess.PAWN, color)
+    return not any(chess.square_file(s) in (f - 1, f + 1) for s in own)
+
+
+def fill_time_interactions(X: np.ndarray, quick: bool, long: bool) -> None:
+    """Think-time interactions; called after the habit column is filled."""
+    X[:, IDX["quick_habit"]] = X[:, IDX["habit"]] if quick else 0.0
+    X[:, IDX["quick_eng_loss"]] = X[:, IDX["eng_loss"]] if quick else 0.0
+    X[:, IDX["quick_capture"]] = X[:, IDX["capture"]] if quick else 0.0
+    X[:, IDX["long_eng_loss"]] = X[:, IDX["eng_loss"]] if long else 0.0
+    X[:, IDX["long_quiet"]] = (1.0 - X[:, IDX["capture"]]) if long else 0.0
+
+
+def plan_of(x: np.ndarray, phase: str = "middlegame", threat_gain: int = 0) -> str:
+    """Read an intention off a move's features. Order matters: the most
+    specific reading wins, and in the opening development beats 'attack'.
+    Parrying a mere pawn threat with a developing move reads as development."""
+    if x[IDX["mate"]]:
+        return "mate"
+    develops = x[IDX["develops"]] or x[IDX["castle"]]
+    if x[IDX["saves"]] > 0 and (threat_gain >= 2 or not develops):
+        return "defend"
+    if x[IDX["capture_gain"]] > 0:
+        return "grab"
+    if x[IDX["equal_trade"]]:
+        return "trade"
+    if phase == "opening" and develops:
+        return "develop"
+    if x[IDX["check"]] or x[IDX["pawn_storm"]] or x[IDX["near_king"]]:
+        return "attack"
+    if develops:
+        return "develop"
+    if x[IDX["pawn_move"]]:
+        return "pawns"
+    return "manoeuvre"
+
+
+def _attention(stack: list[chess.Move], sq_from: chess.Square, sq_to: chess.Square) -> float:
+    """Decayed attention from recent moves (most recent first) to a move's squares."""
+    total = 0.0
+    for k, mv in enumerate(stack[:3]):
+        w = 0.5**k
+        for s_ in (sq_to, sq_from):
+            d = min(chess.square_distance(s_, mv.to_square), chess.square_distance(s_, mv.from_square) + 1)
+            if d <= 1:
+                total += w * (1.0 if d == 0 else 0.5)
+    return min(total, 1.0)
+
+
+def previous_plan(board: chess.Board) -> str | None:
+    """Plan of the side-to-move's previous move, read from the position before it."""
+    if len(board.move_stack) < 2:
+        return None
+    b = board.copy()
+    opp = b.pop()
+    mine = b.pop()
+    pa = analyse_position(b, None)  # no engine: plan_of does not need it
+    try:
+        i = pa.index(mine)
+    except ValueError:
+        return None
+    return plan_of(pa.X[i], pa.phase, pa.threat_gain)
+
+
+def analyse_position(
+    board: chess.Board,
+    engine: Engine | None = None,
+    time_left: float | None = None,
+    base_time: float | None = None,
+    think_time: float | None = None,
+    prev_plan: str | None = None,
+) -> PositionAnalysis:
     board = board.copy()
     color = board.turn
     moves = list(board.legal_moves)
@@ -189,10 +312,18 @@ def analyse_position(board: chess.Board, engine: Engine | None = None, time_left
     X = np.zeros((n, D), dtype=np.float32)
     ph = phase(board)
     tp = time_left is not None and (time_left < TIME_PRESSURE_SECONDS or (bool(base_time) and time_left < 0.1 * base_time))
+    quick = think_time is not None and think_time <= QUICK_SECONDS
+    long = think_time is not None and think_time >= LONG_SECONDS
     codes = np.array([move_code(board, m) for m in moves], dtype=np.int16)
+    own_king = board.king(color)
+    back = 0 if color == chess.WHITE else 7
+    king_castled = own_king is not None and chess.square_rank(own_king) == back and chess.square_file(own_king) not in (3, 4)
 
     last = board.move_stack[-1] if board.move_stack else None
     my_last = board.move_stack[-2] if len(board.move_stack) >= 2 else None
+    opp_recent = board.move_stack[-1::-2][:3]  # opponent's last moves, most recent first
+    own_recent = board.move_stack[-2::-2][:3]
+    last_threatening = last is not None and (board.is_check() or (len(board.move_stack) >= 1 and _last_was_capture(board)))
     enemy_king = board.king(not color)
 
     threats = tactics.threats_against_side_to_move(board)
@@ -265,6 +396,8 @@ def analyse_position(board: chess.Board, engine: Engine | None = None, time_left
                     row[IDX["undo"]] = 1
         if last is not None and chess.square_distance(m.to_square, last.to_square) <= 2:
             row[IDX["reacts"]] = 1
+        row[IDX["attn_opp"]] = _attention(opp_recent, m.from_square, m.to_square)
+        row[IDX["attn_own"]] = _attention(own_recent, m.from_square, m.to_square)
 
         if enemy_king is not None and pt != chess.KING and not is_castle:
             d0 = chess.square_distance(m.from_square, enemy_king)
@@ -284,7 +417,33 @@ def analyse_position(board: chess.Board, engine: Engine | None = None, time_left
             if pt == chess.QUEEN:
                 row[IDX["early_queen"]] = 1
 
+        if pt != chess.PAWN and not is_castle:
+            mob_before = len(board.attacks(m.from_square))
+        else:
+            mob_before = None
+        if pt == chess.PAWN and king_castled and abs(chess.square_file(m.from_square) - chess.square_file(own_king)) <= 1 and chess.square_rank(m.from_square) == (1 if color == chess.WHITE else 6):
+            row[IDX["weakens_shield"]] = 1
+
         board.push(m)
+        if mob_before is not None:
+            row[IDX["mobility_gain"]] = np.clip((len(board.attacks(m.to_square)) - mob_before) / 10.0, -1, 1)
+        if pt == chess.PAWN and not m.promotion:
+            if _is_passed(board, m.to_square, color):
+                row[IDX["passed_pawn"]] = 1
+            if _is_isolated(board, m.to_square, color):
+                row[IDX["isolates_pawn"]] = 1
+            ff = chess.square_file(m.from_square)
+            if True:
+                own_pawns_on_file = any(chess.square_file(sq) == ff for sq in board.pieces(chess.PAWN, color))
+                heavy_on_file = any(chess.square_file(sq) == ff for sq in board.pieces(chess.ROOK, color) | board.pieces(chess.QUEEN, color))
+                if not own_pawns_on_file and heavy_on_file:
+                    row[IDX["opens_file"]] = 1
+        if pt != chess.KING:
+            for t in board.attacks(m.to_square):
+                p_ = board.piece_at(t)
+                if p_ and p_.color != color and p_.piece_type == chess.PAWN and not board.is_attacked_by(not color, t):
+                    row[IDX["attacks_weak_pawn"]] = 1
+                    break
         if board.is_checkmate():
             row[IDX["mate"]] = 1
             mates.append(m)
@@ -319,7 +478,13 @@ def analyse_position(board: chess.Board, engine: Engine | None = None, time_left
             if tp:
                 row[IDX["tp_eng_loss"]] = row[IDX["eng_loss"]]
 
-    return PositionAnalysis(
+    harmless = last is not None and threat_gain == 0 and not mate_threats and not last_threatening
+    for i in range(n):
+        if harmless and X[i, IDX["reacts"]]:
+            X[i, IDX["reacts_harmless"]] = 1
+        if prev_plan is not None and plan_of(X[i], ph, threat_gain) == prev_plan:
+            X[i, IDX["same_plan"]] = 1
+    pa_ = PositionAnalysis(
         board=board,
         moves=moves,
         X=X,
@@ -336,7 +501,12 @@ def analyse_position(board: chess.Board, engine: Engine | None = None, time_left
         phase=ph,
         codes=codes,
         time_pressure=bool(tp),
+        quick=bool(quick),
+        long=bool(long),
+        prev_plan=prev_plan,
     )
+    fill_time_interactions(X, bool(quick), bool(long))
+    return pa_
 
 
 def addresses_threat(pa: PositionAnalysis, i: int) -> bool:
