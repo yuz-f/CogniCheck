@@ -20,9 +20,11 @@ from .model import softmax
 BOOK_ALPHA = 2.0  # pseudo-count of the model inside the opening book
 
 class Predictor:
-    def __init__(self, profile, engine: Engine | None = None):
+    def __init__(self, profile, engine: Engine | None = None, neural=None):
         self.profile = profile
         self.engine = engine
+        self.neural = neural
+        self.rating = (profile.stats or {}).get("rating")
         self.w = np.asarray(profile.weights, dtype=np.float64)
         self.prior = np.asarray(profile.prior, dtype=np.float64)
         self.motif_index: dict[str, float] = (profile.blind_spots or {}).get("motif_index", {})
@@ -52,7 +54,7 @@ class Predictor:
     def analyse(self, board: chess.Board, think_time: float | None = None, time_left: float | None = None) -> PositionAnalysis:
         from .features import fill_time_interactions
 
-        pa = analyse_position(board, self.engine, time_left=time_left, think_time=think_time, prev_plan=previous_plan(board))
+        pa = analyse_position(board, self.engine, time_left=time_left, think_time=think_time, prev_plan=previous_plan(board), neural=self.neural, elo_self=self.rating, elo_oppo=self.rating)
         table = self.habits.get("table")
         if table:
             pa.X[:, IDX["habit"]] = habit_values(pa.codes, table, self.habits.get("base_rate", 0.0))

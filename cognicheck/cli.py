@@ -148,6 +148,13 @@ def cmd_cohort(args):
         cohort.fetch_games(args.games)
     if args.stage in ("analyse", "all"):
         cohort.analyse_all(workers=args.workers, depth=args.depth)
+    if args.stage in ("maia", "all"):
+        from .neural import available
+
+        if available():
+            cohort.maia_all(workers=args.workers)
+        else:
+            print("maia2/torch not installed - skipping neural features", file=sys.stderr)
     if args.stage in ("fit", "all"):
         cohort.fit_all()
     if args.stage in ("pca", "all"):
@@ -200,7 +207,7 @@ def main(argv=None):
     li.set_defaults(func=cmd_lichess)
 
     co = sub.add_parser("cohort", help="profile many real Lichess players and run the PCA")
-    co.add_argument("stage", choices=["select", "fetch", "analyse", "fit", "pca", "all"])
+    co.add_argument("stage", choices=["select", "fetch", "analyse", "maia", "fit", "pca", "all"])
     co.add_argument("--per-bin", type=int, default=9, help="players per rating band")
     co.add_argument("--min-games", type=int, default=400, help="minimum rated blitz games on Lichess")
     co.add_argument("--games", type=int, default=200, help="games to download per player")

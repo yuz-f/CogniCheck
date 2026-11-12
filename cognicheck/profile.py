@@ -69,8 +69,18 @@ def increment(time_control: str | None) -> float:
         return 0.0
 
 
-def iter_decisions(pg: PlayerGame, game_index: int, engine: Engine | None, max_plies: int = 200):
+def _elo(headers, side: str) -> int | None:
+    try:
+        return int(headers.get(f"{side}Elo", ""))
+    except ValueError:
+        return None
+
+
+def iter_decisions(pg: PlayerGame, game_index: int, engine: Engine | None, max_plies: int = 200, neural=None):
     board = pg.game.board()
+    h = pg.game.headers
+    elo_self = _elo(h, "White" if pg.color == chess.WHITE else "Black")
+    elo_oppo = _elo(h, "Black" if pg.color == chess.WHITE else "White")
     tc = pg.game.headers.get("TimeControl")
     base, inc = base_time(tc), increment(tc)
     my_clock = None  # seconds left after the player's previous move
@@ -83,7 +93,7 @@ def iter_decisions(pg: PlayerGame, game_index: int, engine: Engine | None, max_p
             # Time spent on this move (known after the fact; in live mode it is the elapsed time).
             c_after = node.clock()
             think = (my_clock + inc - c_after) if (my_clock is not None and c_after is not None) else None
-            pa = analyse_position(board, engine, time_left=my_clock, base_time=base, think_time=think, prev_plan=prev_plan)
+            pa = analyse_position(board, engine, time_left=my_clock, base_time=base, think_time=think, prev_plan=prev_plan, neural=neural, elo_self=elo_self, elo_oppo=elo_oppo)
             try:
                 idx = pa.index(move)
             except ValueError:
@@ -458,6 +468,7 @@ def build_profile(
     lam: float = 0.01,
     seed: int = 7,
     progress=None,
+    neural=None,
 ) -> Profile:
     if not games:
         raise ValueError(f"no games found for {name!r}")
@@ -473,7 +484,7 @@ def build_profile(
     test: list[Decision] = []
     for gi, pg in enumerate(games):
         target = test if gi in hold_idx else train
-        target.extend(iter_decisions(pg, gi, engine))
+        target.extend(iter_decisions(pg, gi, engine, neural=neural))
         if progress:
             progress(gi + 1, len(games))
 

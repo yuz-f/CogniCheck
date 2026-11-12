@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 data/cache/
 data/real/
+data/maia2_models/

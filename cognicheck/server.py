@@ -55,7 +55,9 @@ def get_profile(pid: str) -> Profile:
 
 
 def predictor_for(pid: str) -> Predictor:
-    return Predictor(get_profile(pid), shared_engine())
+    from .neural import shared_neural
+
+    return Predictor(get_profile(pid), shared_engine(), shared_neural())
 
 
 # ------------------------------------------------------------------ models
@@ -106,7 +108,9 @@ class PositionRequest(BaseModel):
 def health():
     from .cohort import POPULATION_REAL
 
-    return {"ok": True, "engine": shared_engine() is not None, "players": len(profiles()), "cohort": POPULATION_REAL.exists()}
+    from .neural import shared_neural
+
+    return {"ok": True, "engine": shared_engine() is not None, "neural": shared_neural() is not None, "players": len(profiles()), "cohort": POPULATION_REAL.exists()}
 
 
 @app.get("/api/players")
@@ -291,7 +295,7 @@ def new_game(req: GameRequest):
             raise HTTPException(400, "bad game index")
         pgn = prof.heldout[idx]
     try:
-        sess = sessions.create(Predictor(prof, shared_engine()), pgn)
+        sess = sessions.create(predictor_for(prof.id), pgn)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return sess.state()
@@ -345,11 +349,11 @@ def _live_matcher(player_id: str | None, color: str | None):
                 c = chess.WHITE if color == "white" else chess.BLACK
             else:
                 return None, None
-            return Predictor(prof, shared_engine()), c
+            return predictor_for(prof.id), c
         for c, name in ((chess.WHITE, white), (chess.BLACK, black)):
             for prof in profs.values():
                 if prof.name.lower() == name.lower():
-                    return Predictor(prof, shared_engine()), c
+                    return predictor_for(prof.id), c
         return None, None
 
     return match

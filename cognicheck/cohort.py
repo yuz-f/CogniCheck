@@ -171,6 +171,44 @@ def _analyse_player(pid: str, username: str, depth: int, progress=None) -> str:
     return pid
 
 
+def _maia_player(pid: str, username: str) -> str:
+    """Neural columns for one player, aligned with the stored feature rows."""
+    from .neural import Neural
+    from .profile import iter_decisions
+
+    out = ANALYSIS / f"{pid}.maia.npy"
+    if out.exists():
+        return pid
+    z = np.load(ANALYSIS / f"{pid}.npz")
+    neural = Neural()
+    games = games_of(parse_pgn((GAMES / f"{pid}.pgn").read_text()), username)
+    cols = []
+    for gi, pg in enumerate(games):
+        for d in iter_decisions(pg, gi, None, neural=neural):
+            if len(d.pa.moves) > 1:
+                cols.append(d.pa.X[:, [IDX["maia_logp"], IDX["maia_top"]]])
+    M = np.concatenate(cols) if cols else np.zeros((0, 2), np.float32)
+    if len(M) != len(z["X"]):
+        raise RuntimeError(f"{pid}: neural rows {len(M)} != feature rows {len(z['X'])}")
+    np.save(out, M.astype(np.float16))
+    return pid
+
+
+def maia_all(workers: int = 4) -> None:
+    players = json.loads(PLAYERS.read_text())
+    todo = [p for p in players if (ANALYSIS / f"{p['id']}.npz").exists() and not (ANALYSIS / f"{p['id']}.maia.npy").exists()]
+    t0 = time.time()
+    with ProcessPoolExecutor(workers) as ex:
+        futs = {ex.submit(_maia_player, p["id"], p["username"]): p for p in todo}
+        for i, f in enumerate(as_completed(futs), 1):
+            p = futs[f]
+            try:
+                f.result()
+                print(f"  maia {p['username']} ({i}/{len(todo)}, {time.time() - t0:.0f}s)", file=sys.stderr)
+            except Exception as e:
+                print(f"  FAILED {p['username']}: {e}", file=sys.stderr)
+
+
 def analyse_all(workers: int = 4, depth: int = 5) -> None:
     players = json.loads(PLAYERS.read_text())
     ANALYSIS.mkdir(parents=True, exist_ok=True)
@@ -190,7 +228,14 @@ def analyse_all(workers: int = 4, depth: int = 5) -> None:
 # --------------------------------------------------------------------- fit
 def _load_ds(pid: str) -> tuple[model.Dataset, np.ndarray]:
     z = np.load(ANALYSIS / f"{pid}.npz")
-    ds = model.Dataset(z["X"].astype(np.float64), z["starts"], z["chosen"])
+    X = z["X"].astype(np.float64)
+    maia = ANALYSIS / f"{pid}.maia.npy"
+    if maia.exists():
+        M = np.load(maia).astype(np.float64)
+        if len(M) == len(X):
+            X[:, IDX["maia_logp"]] = M[:, 0]
+            X[:, IDX["maia_top"]] = M[:, 1]
+    ds = model.Dataset(X, z["starts"], z["chosen"])
     ds.code = z["code"] if "code" in z else None  # type: ignore[attr-defined]
     ds.tp = z["tp"] if "tp" in z else None  # type: ignore[attr-defined]
     ds.quick = z["quick"] if "quick" in z else None  # type: ignore[attr-defined]
@@ -494,7 +539,7 @@ def _finish_add(entry, pid, username, depth, prior, step) -> dict:
 
 
 # ---------------------------------------------------------------------- PCA
-STYLE_SKIP = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "tp_hangs", "tp_capture"}  # strength / sparse
+STYLE_SKIP = {"eng_loss", "eng_best", "eng_blunder", "eng_loss_small", "eng_loss_mid", "eng_rank", "tp_eng_loss", "tp_hangs", "tp_capture", "quick_eng_loss", "long_eng_loss", "maia_logp", "maia_top"}  # strength / sparse
 
 
 def cognition_vector(w: np.ndarray, prior: np.ndarray, blind: dict, stats: dict) -> dict[str, float]:

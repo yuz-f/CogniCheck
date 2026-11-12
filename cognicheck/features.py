@@ -81,7 +81,10 @@ FEATURES: list[tuple[str, str]] = [
     ("attn_own", "goes where the player has just been active"),
     ("reacts_harmless", "answers the opponent's last move although it threatened nothing"),
     ("same_plan", "continues the player's previous plan"),
+    ("maia_logp", "how typical the move is for a human of this rating (Maia-2)"),
+    ("maia_top", "the move a typical human of this rating would play (Maia-2)"),
 ]
+NEURAL_FEATURES = {"maia_logp", "maia_top"}
 PLANS = [
     ("mate", "go for mate"),
     ("attack", "attack the king"),
@@ -304,6 +307,9 @@ def analyse_position(
     base_time: float | None = None,
     think_time: float | None = None,
     prev_plan: str | None = None,
+    neural=None,
+    elo_self: int | None = None,
+    elo_oppo: int | None = None,
 ) -> PositionAnalysis:
     board = board.copy()
     color = board.turn
@@ -478,6 +484,11 @@ def analyse_position(
             if tp:
                 row[IDX["tp_eng_loss"]] = row[IDX["eng_loss"]]
 
+    if neural is not None and n:
+        es = int(elo_self or 1500)
+        logp, top = neural.features(board, moves, es, int(elo_oppo or es))
+        X[:, IDX["maia_logp"]] = logp / 3.0  # roughly [-2, 0]
+        X[:, IDX["maia_top"]] = top
     harmless = last is not None and threat_gain == 0 and not mate_threats and not last_threatening
     for i in range(n):
         if harmless and X[i, IDX["reacts"]]:

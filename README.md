@@ -288,6 +288,33 @@ on millions of games, ~50–55 %) is the price of a 50-weight model that can exp
 every prediction. The natural next step is to keep this model as the interpretable
 head and feed it a neural position encoder's move probabilities as one more feature.
 
+## Optional: Maia-2 human-move prior
+
+With `torch` and `maia2` installed, every legal move also gets two features from
+Maia-2 (Tang et al., 2024), a network trained on millions of Lichess games to predict
+what a human *of a given rating* plays: the log-probability of the move and whether it
+is Maia's top choice. The personal model then learns how far each player deviates from
+a typical player of their strength, and the explanations stay readable.
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU build, ~200 MB
+pip install --no-deps maia2 && pip install einops gdown pandas pyyaml pyzstd requests tqdm
+python -m cognicheck cohort maia   # adds the neural columns to an existing analysis
+python -m cognicheck cohort fit && python -m cognicheck cohort pca
+```
+
+The weights (280 MB) download on first use into `data/maia2_models/`. If the Google
+Drive download fails behind a proxy, fetch them directly:
+
+```bash
+mkdir -p data/maia2_models && cd data/maia2_models
+curl -L -o blitz_model.pt "https://drive.usercontent.google.com/download?id=1X-Z4J3PX3MQFJoa8gRt3aL8CIH0PWoyt&export=download&confirm=t"
+curl -L -o config.yaml   "https://drive.usercontent.google.com/download?id=1GQTskYMVMubNwZH2Bi6AmevI15CS6gk0&export=download&confirm=t"
+```
+
+Inference costs about 20 ms per position on a CPU core. Without the package the
+features are zero and everything else works as before.
+
 ## Live games
 
 The **Live** tab follows a game while it is being played on Lichess (game link, game

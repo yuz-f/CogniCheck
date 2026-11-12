@@ -239,3 +239,16 @@ def test_think_time_interactions():
     i = quick.index(chess.Move.from_uci("f3e5"))
     assert quick.X[i, IDX["quick_capture"]] == 1 and slow.X[i, IDX["quick_capture"]] == 0
     assert slow.X[quick.index(chess.Move.from_uci("b1c3")), IDX["long_quiet"]] == 1
+
+
+def test_neural_features_if_available():
+    from cognicheck import neural
+
+    if not neural.available() or not (neural.MODEL_DIR / "blitz_model.pt").exists():
+        pytest.skip("maia2 weights not installed")
+    n = neural.Neural()
+    b = chess.Board()
+    pa = analyse_position(b, neural=n, elo_self=1500, elo_oppo=1500)
+    logp = pa.X[:, IDX["maia_logp"]]
+    assert pa.X[:, IDX["maia_top"]].sum() == 1
+    assert logp.max() <= 0 and logp[pa.index(chess.Move.from_uci("e2e4"))] > logp[pa.index(chess.Move.from_uci("a2a3"))]
