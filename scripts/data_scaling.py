@@ -40,7 +40,16 @@ def fetch():
         if out.exists() and out.stat().st_size > 1000:
             continue
         url = f"{cohort.LICHESS}/api/games/user/{p['id']}?max={N_GAMES}&rated=true&perfType=blitz&clocks=true&evals=false&opening=false"
-        text = cohort._get(url, "application/x-chess-pgn", timeout=900)
+        text = None
+        for attempt in range(5):
+            try:
+                text = cohort._get(url, "application/x-chess-pgn", timeout=900)
+                break
+            except Exception as e:  # connection resets on long streams: back off and retry
+                print(f"  retry {attempt + 1} for {p['username']}: {e}", file=sys.stderr)
+                time.sleep(20 * (attempt + 1))
+        if text is None:
+            continue
         out.write_text(text)
         print(f"  fetched {p['username']}: {text.count('[Event ')} games", file=sys.stderr)
         time.sleep(2)
