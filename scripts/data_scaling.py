@@ -154,7 +154,7 @@ def fit():
     import multiprocessing
 
     res = []
-    with ProcessPoolExecutor(4, mp_context=multiprocessing.get_context("spawn")) as ex:
+    with ProcessPoolExecutor(2, mp_context=multiprocessing.get_context("spawn")) as ex:
         for r in ex.map(_fit_one, players()):
             res.append(r)
     (ROOT / "results.json").write_text(json.dumps(res, indent=1))
