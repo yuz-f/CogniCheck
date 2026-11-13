@@ -37,7 +37,8 @@ from cognicheck.ingest import games_of, parse_pgn  # noqa: E402
 from cognicheck.predictor import BOOK_ALPHA  # noqa: E402
 from cognicheck.profile import build_book, position_key  # noqa: E402
 
-RANK = 32
+RANK = int(sys.argv[sys.argv.index("--rank") + 1]) if "--rank" in sys.argv else 32
+POP_EPOCHS = int(sys.argv[sys.argv.index("--epochs") + 1]) if "--epochs" in sys.argv else 6
 N_MOVES = 1880
 MAX_PLIES = 200
 
@@ -141,6 +142,7 @@ def train_adapter(D, fit_idx, val_idx, init=None, l2=0.0, lr=1e-3, epochs=6, pat
             loss.backward()
             opt.step()
         v = val_loss()
+        print(f"    epoch val NLL {v:.4f}", file=sys.stderr)
         if v < best - 1e-5:
             best, best_p, bad = v, (U.detach().clone(), V.detach().clone()), 0
         else:
@@ -217,7 +219,7 @@ if __name__ == "__main__":
 
     torch.set_num_threads(4)
     players = [p for p in json.loads(cohort.PLAYERS.read_text()) if (cohort.ANALYSIS / f"{p['id']}.emb.npz").exists()]
-    nums = [a for a in sys.argv[1:] if a.isdigit()]
+    nums = [a for i, a in enumerate(sys.argv[1:], 1) if a.isdigit() and sys.argv[i - 1] not in ("--rank", "--epochs")]
     if nums:
         players = players[: int(nums[0])]
     t0 = time.time()
@@ -231,7 +233,7 @@ if __name__ == "__main__":
     rng.shuffle(tr_idx)
     n_val = max(1, len(tr_idx) // 20)
     t0 = time.time()
-    pop, pop_val = train_adapter(D, tr_idx[n_val:], tr_idx[:n_val])
+    pop, pop_val = train_adapter(D, tr_idx[n_val:], tr_idx[:n_val], epochs=POP_EPOCHS, patience=3)
     print(f"population correction trained on {len(tr_idx) - n_val} positions in {time.time() - t0:.0f}s, val NLL {pop_val:.4f}", file=sys.stderr)
     torch.save({"U": pop[0], "V": pop[1]}, cohort.REAL / "adapter_population.pt")
 
@@ -269,5 +271,5 @@ if __name__ == "__main__":
             lo, hi = ci(d, rng)
             summary[f"{m}_minus_current_{k}"] = [float(d.mean()), float(lo), float(hi)]
             print(f"{m} minus current, {k:10s}: {d.mean():+.4f} [{lo:+.4f}, {hi:+.4f}]")
-    (cohort.REAL / "adapter_experiment.json").write_text(json.dumps({"summary": summary, "rows": [
+    (cohort.REAL / f"adapter_experiment_r{RANK}_e{POP_EPOCHS}.json").write_text(json.dumps({"summary": summary, "rows": [
         {"id": r["id"], **{m: {k: float(res[m][i][k]) for k in keys} for m in res}} for i, r in enumerate(rows)]}, indent=1))
