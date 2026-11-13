@@ -385,6 +385,27 @@ Conclusion for anyone chasing accuracy with this design: the feature road is exh
 at this data size. The remaining levers are **more games per player** and **a model that
 sees the whole game and clock**, both measured next on the same frozen test games.
 
+### Does more data help? (data-scaling curve)
+
+`scripts/data_scaling.py`: 20 players spread over the rating range, up to 1000 recent
+blitz games each. Each player's **30 most recent games are the frozen test set**; the
+model is trained on the 170, 470 or 970 games before them (17 players had all three).
+
+| Training games | Linear | + book | Head | **Full (head + book)** |
+|---|---|---|---|---|
+| 170 (= the cohort setting) | 51.2% | 54.8% | 54.1% | **55.8%** |
+| 470 | 51.4% | 55.3% | 54.9% | **56.5%** |
+| 970 | 51.5% | 55.6% | 55.5% | **56.8%** |
+
+Five to six times the games buy about one point, nearly all of it in the non-linear
+head (+1.4) and more for weaker players (+1.5 under 1800, +0.4 above). The linear
+traits are already saturated at 200 games. Extrapolating the log-linear trend, 10,000
+games per player would add roughly another 1.5 points: data alone takes this design to
+the high 50s, not beyond. The gain going to the head says the extra games teach
+interactions the fixed feature set cannot express, which argues for a model that sees
+the whole game (a sequence model, or the Maia-2 backbone fine-tuned per player) rather
+than for more hand-made features.
+
 ### Working memory (v4)
 
 Chess cognition research puts a player's working memory at roughly 3–5 "chunks". We
