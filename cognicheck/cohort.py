@@ -358,6 +358,19 @@ def _pool(samples) -> model.Dataset:
     return model.Dataset.from_positions([(d.X[s:e], int(c - s)) for d in samples for s, e, c in zip(d.starts, np.append(d.starts[1:], len(d.X)), d.chosen)])
 
 
+HOLDOUT_FRAC = 0.15
+
+
+def holdout_games(pid: str, holdout_frac: float = HOLDOUT_FRAC) -> set[int]:
+    """The player's most recent games (the PGN lists newest first): the held-out set."""
+    n_games = json.loads((ANALYSIS / f"{pid}.json").read_text())["games"]
+    return set(range(n_games)[: max(1, int(round(n_games * holdout_frac)))])
+
+
+def train_mask(pid: str, game: np.ndarray, holdout_frac: float = HOLDOUT_FRAC) -> np.ndarray:
+    return ~np.isin(game, list(holdout_games(pid, holdout_frac)))
+
+
 def train_population(players: list[dict]) -> np.ndarray:
     """Population priors: one global and one per rating band (shrunk to the global).
 
@@ -367,9 +380,13 @@ def train_population(players: list[dict]) -> np.ndarray:
     rng = np.random.default_rng(0)
     pooled, bands = [], {i: [] for i in range(len(RATING_BANDS))}
     for p in players:
-        ds, _ = _load_ds(p["id"])
-        _fill_habits(ds, np.ones(len(ds), bool))
-        idx = rng.choice(len(ds), size=min(800, len(ds)), replace=False)
+        ds, game = _load_ds(p["id"])
+        # Only the player's training games: their held-out games must never reach the prior
+        # or the pre-trained head, since every player's evaluation shrinks towards them.
+        train = train_mask(p["id"], game)
+        _fill_habits(ds, train)
+        cand = np.flatnonzero(train)
+        idx = rng.choice(cand, size=min(800, len(cand)), replace=False)
         sub = _subset(ds, np.isin(np.arange(len(ds)), idx))
         pooled.append(sub)
         bands[band_of(p["rating"])].append(sub)
