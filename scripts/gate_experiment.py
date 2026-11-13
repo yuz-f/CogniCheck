@@ -28,14 +28,21 @@ from cognicheck.predictor import BOOK_ALPHA  # noqa: E402
 from cognicheck.profile import build_book, iter_decisions, position_key  # noqa: E402
 
 GATE_FRAC = 0.15
+NO_THINK = "--no-think" in sys.argv  # drop the think time of the move being predicted (unknown before it is played)
+CLOCK = "--clock" in sys.argv  # plan step 3: clock and session context (scripts/clock_columns.py)
 Z_NAMES = ["const", "middlegame", "endgame", "time_pressure", "load", "maia_entropy", "own_entropy", "in_book", "maia_on"]
+CLOCK_NAMES = ["own_clock", "opp_clock", "clock_lead", "prev_think", "opp_think", "session_game", "after_loss", "move_number"]
+MOVE_FEATURES = ["eng_loss", "eng_best", "capture", "check", "habit", "hangs", "castle", "king_move", "pawn_move", "same_piece"]
+if CLOCK:
+    Z_NAMES = Z_NAMES + CLOCK_NAMES
+F_IDX = [IDX[f] for f in MOVE_FEATURES]
 
 
 def _entropy(p):
     return float(-(p * np.log(np.maximum(p, 1e-12))).sum())
 
 
-def _expert_probs(p, ds, game, pgs, fit_games, eval_games):
+def _expert_probs(p, ds, game, pgs, fit_games, eval_games, clock=None):
     """Personal model fitted on fit_games, both experts' log-probs on eval_games."""
     fit_mask = np.isin(game, list(fit_games))
     cohort._fill_habits(ds, fit_mask)
@@ -45,6 +52,7 @@ def _expert_probs(p, ds, game, pgs, fit_games, eval_games):
     book = build_book([g for i, g in enumerate(pgs) if i in fit_games])
     ev_mask = np.isin(game, list(eval_games))
     te = cohort._subset(ds, ev_mask)
+    ck = clock[ev_mask] if clock is not None else None
     tp = ds.tp[ev_mask] if getattr(ds, "tp", None) is not None else np.zeros(len(te), bool)
     ends = np.append(te.starts[1:], len(te.X))
     rows, k = [], 0
@@ -68,8 +76,12 @@ def _expert_probs(p, ds, game, pgs, fit_games, eval_games):
             ph = phase(d.pa.board)
             z = np.array([1.0, ph == "middlegame", ph == "endgame", float(tp[k]), X[0, IDX["load"]] / 10.0,
                           _entropy(pm) if maia_on else 0.0, _entropy(po), float(tot > 0), float(maia_on)])
+            if CLOCK:
+                cv = ck[k].astype(float).copy()
+                cv[5] /= 10.0  # session_game
+                z = np.concatenate([z, cv])
             rows.append({"lpo": np.log(np.maximum(po, 1e-6)), "lpm": np.log(np.maximum(pm, 1e-6)), "z": z,
-                         "c": int(c - s), "phase": ph, "blunder": bool(X[c - s, IDX["eng_loss"]] >= 2)})
+                         "F": X[:, F_IDX].copy(), "ck": (z[-len(CLOCK_NAMES):] if CLOCK else None), "c": int(c - s), "phase": ph, "blunder": bool(X[c - s, IDX["eng_loss"]] >= 2)})
             k += 1
     if k != len(te):
         raise RuntimeError(f"{p['id']}: {k} decisions vs {len(te)} rows")
@@ -78,29 +90,41 @@ def _expert_probs(p, ds, game, pgs, fit_games, eval_games):
 
 def player(p):
     ds, game = cohort._load_ds(p["id"])
+    if NO_THINK and getattr(ds, "quick", None) is not None:
+        ds.quick = np.zeros_like(ds.quick)
+        ds.long = np.zeros_like(ds.long)
     pgs = games_of(parse_pgn((cohort.GAMES / f"{p['id']}.pgn").read_text()), p["username"])
     hold = cohort.holdout_games(p["id"])
     train_games = sorted(set(game.tolist()) - hold)
     n_gate = max(1, int(round(len(train_games) * GATE_FRAC)))
     gate_games = set(train_games[:n_gate])  # newest training games (PGN is newest first)
     inner = set(train_games[n_gate:])
-    gate_rows = _expert_probs(p, ds, game, pgs, inner, gate_games)
-    test_rows = _expert_probs(p, ds, game, pgs, set(train_games), hold)
+    clock = None
+    if CLOCK:
+        clock = np.load(cohort.ANALYSIS / f"{p['id']}.clock.npz")["C"]
+    gate_rows = _expert_probs(p, ds, game, pgs, inner, gate_games, clock)
+    test_rows = _expert_probs(p, ds, game, pgs, set(train_games), hold, clock)
     return {"id": p["id"], "gate": gate_rows, "test": test_rows}
 
 
 def design(rows):
     pos = []
     for r in rows:
-        Xb = np.concatenate([np.outer(r["lpo"], r["z"]), np.outer(r["lpm"], r["z"])], axis=1)
+        parts = [np.outer(r["lpo"], r["z"]), np.outer(r["lpm"], r["z"])]
+        if CLOCK:  # move features x clock context
+            parts.append((r["F"][:, :, None] * r["ck"][None, None, :]).reshape(len(r["F"]), -1))
+        Xb = np.concatenate(parts, axis=1)
         pos.append((Xb, r["c"]))
     return model.Dataset.from_positions(pos)
 
 
 def blend(r, theta):
     K = len(Z_NAMES)
-    a, b = theta[:K] @ r["z"], theta[K:] @ r["z"]
-    return model.softmax(a * r["lpo"] + b * r["lpm"]), a, b
+    a, b = theta[:K] @ r["z"], theta[K:2 * K] @ r["z"]
+    s = a * r["lpo"] + b * r["lpm"]
+    if CLOCK:
+        s = s + (r["F"][:, :, None] * r["ck"][None, None, :]).reshape(len(r["F"]), -1) @ theta[2 * K:]
+    return model.softmax(s), a, b
 
 
 def score(rows, f):
@@ -119,8 +143,9 @@ def ci(x, rng):
 
 if __name__ == "__main__":
     players = [p for p in json.loads(cohort.PLAYERS.read_text()) if (cohort.ANALYSIS / f"{p['id']}.npz").exists()]
-    if len(sys.argv) > 1:
-        players = players[: int(sys.argv[1])]
+    nums = [a for a in sys.argv[1:] if a.isdigit()]
+    if nums:
+        players = players[: int(nums[0])]
     out = []
     with ProcessPoolExecutor(2, mp_context=multiprocessing.get_context("spawn")) as ex:
         for i, r in enumerate(ex.map(player, players), 1):
@@ -128,7 +153,7 @@ if __name__ == "__main__":
             print(f"  {i}/{len(players)} {r['id']}", file=sys.stderr)
     K = len(Z_NAMES)
     gds = design([row for r in out for row in r["gate"]])
-    prior = np.zeros(2 * K)
+    prior = np.zeros(2 * K + (len(MOVE_FEATURES) * len(CLOCK_NAMES) if CLOCK else 0))
     prior[0] = 1.0
     theta = model.fit(gds, prior=prior, lam=1e-4)
     print("\ngate weights (personal | maia):")
@@ -162,7 +187,7 @@ if __name__ == "__main__":
     lo2, hi2 = ci(d2, rng)
     print(f"\ngated minus personal: top-1 {d1.mean() * 100:+.2f} pts [{lo * 100:+.2f}, {hi * 100:+.2f}], better for {(d1 > 0).sum()}/{len(d1)}; "
           f"log-loss {d2.mean():+.4f} [{lo2:+.4f}, {hi2:+.4f}]")
-    (cohort.REAL / "gate_experiment.json").write_text(json.dumps({
-        "theta": dict(zip([f"personal_{n}" for n in Z_NAMES] + [f"maia_{n}" for n in Z_NAMES], map(float, theta))),
+    (cohort.REAL / ("gate_experiment" + ("_clock" if CLOCK else "") + ("_nothink" if NO_THINK else "") + ".json")).write_text(json.dumps({
+        "theta": [float(x) for x in theta], "z_names": Z_NAMES,
         "top1_diff": [float(d1.mean()), float(lo), float(hi)], "logloss_diff": [float(d2.mean()), float(lo2), float(hi2)],
         "rows": [{"id": r["id"], **{m: per[m][i] for m in per}} for i, r in enumerate(out)]}, indent=1))
