@@ -144,6 +144,10 @@ def print_summary(s: dict) -> None:
     for m, r in s["models"].items():
         t = r["top1"]
         print(f"{m:16s} {t['mean']:.4f} [{t['ci95'][0]:.3f}, {t['ci95'][1]:.3f}] {r['top3']['mean']:8.4f} {r['logloss']['mean']:9.4f} {r['ece']['mean']:9.4f} {r['top1_opening']['mean']:7.3f} {r['top1_middlegame']['mean']:7.3f} {r['top1_endgame']['mean']:7.3f} {r['top1_blunder']['mean']:8.3f}")
+    ceil = cohort.REAL / "ceiling.json"
+    if ceil.exists():  # scripts/repeatability.py: players' own consistency in repeated positions
+        c = json.loads(ceil.read_text())["all"]
+        print(f"{'repeatability':16s} {c['all']['ceiling']:.4f} (reference only, repeated positions){'':22s} {c['opening']['ceiling']:7.3f} {c['middlegame']['ceiling']:7.3f} {c['endgame']['ceiling']:7.3f}")
     print("\npersonal_full minus baseline (top-1 points; log-loss, negative is better):")
     for b, r in s["personal_full_minus"].items():
         t, ll = r["top1"], r["logloss"]
