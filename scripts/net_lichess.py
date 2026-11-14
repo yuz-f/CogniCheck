@@ -99,26 +99,42 @@ def encode(texts: list[str]):
 
 
 def games_from_stream(url: str, names: set[str]):
-    """Yield PGN texts of kept games from the streamed archive."""
+    """Yield PGN texts of kept games from the streamed archive.
+
+    A dropped connection restarts the stream from the beginning and skips the games already
+    yielded (the header filter is cheap), so the output is the same as one unbroken read."""
     import zstandard
 
-    proc = subprocess.Popen(["curl", "-sS", "--retry", "5", url], stdout=subprocess.PIPE)
-    reader = io.TextIOWrapper(zstandard.ZstdDecompressor().stream_reader(proc.stdout), encoding="utf-8", errors="replace")
-    lines, headers, in_moves = [], {}, False
-    try:
-        for line in reader:
-            if line.startswith("[Event ") and in_moves:
-                if keep_headers(headers, names) and "%clk" in "".join(lines[-3:]):
-                    yield "".join(lines)
-                lines, headers, in_moves = [], {}, False
-            lines.append(line)
-            m = _HDR.match(line.strip())
-            if m:
-                headers[m.group(1)] = m.group(2)
-            elif line.strip():
-                in_moves = True
-    finally:
-        proc.kill()
+    yielded = 0
+    for attempt in range(20):
+        proc = subprocess.Popen(["curl", "-sS", "--http1.1", url], stdout=subprocess.PIPE)
+        reader = io.TextIOWrapper(zstandard.ZstdDecompressor().stream_reader(proc.stdout), encoding="utf-8", errors="replace")
+        lines, headers, in_moves, seen = [], {}, False, 0
+        try:
+            for line in reader:
+                if line.startswith("[Event ") and in_moves:
+                    if keep_headers(headers, names) and "%clk" in "".join(lines[-3:]):
+                        seen += 1
+                        if seen > yielded:
+                            yielded += 1
+                            yield "".join(lines)
+                    lines, headers, in_moves = [], {}, False
+                lines.append(line)
+                m = _HDR.match(line.strip())
+                if m:
+                    headers[m.group(1)] = m.group(2)
+                elif line.strip():
+                    in_moves = True
+        except Exception as e:  # truncated stream: zstd raises on a cut-off frame
+            print(f"  stream error after {yielded:,} games: {e}", file=sys.stderr)
+        finally:
+            rc = proc.poll()
+            proc.kill()
+            proc.wait()
+        if rc == 0:  # curl finished the whole archive
+            return
+        print(f"  restarting stream (attempt {attempt + 2}), skipping {yielded:,} kept games", file=sys.stderr)
+        time.sleep(10)
 
 
 def write_shard(parts, k, game_base, out):
