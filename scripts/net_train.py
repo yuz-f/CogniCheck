@@ -30,8 +30,8 @@ class Split:
         self.planes = z[prefix + "planes"]
         self.elo = z[prefix + "elo"].astype(np.float32)
         self.off = z[prefix + "off"]
-        self.legal = z[prefix + "legal"].astype(np.int64)
-        self.target = z[prefix + "target"].astype(np.int64)
+        self.legal = z[prefix + "legal"]  # int16; converted per batch to save memory (20M positions: 1.3 GB instead of 5.4 GB)
+        self.target = z[prefix + "target"]
         self.idx = np.arange(len(self.target)) if idx is None else idx
 
     def __len__(self):
@@ -43,7 +43,7 @@ class Split:
         mask = np.zeros((len(j), chessnet.N_MOVES), dtype=bool)
         tgt = np.empty(len(j), np.int64)
         for r, k in enumerate(j):
-            lm = self.legal[self.off[k]:self.off[k + 1]]
+            lm = self.legal[self.off[k]:self.off[k + 1]].astype(np.int64)
             mask[r, lm] = True
             tgt[r] = lm[self.target[k]]
         return torch.from_numpy(x.astype(np.float32)), torch.from_numpy(self.elo[j]), torch.from_numpy(mask), torch.from_numpy(tgt)
