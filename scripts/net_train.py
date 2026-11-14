@@ -33,6 +33,8 @@ class Split:
         self.legal = z[prefix + "legal"]  # int16; converted per batch to save memory (20M positions: 1.3 GB instead of 5.4 GB)
         self.target = z[prefix + "target"]
         self.idx = np.arange(len(self.target)) if idx is None else idx
+        self.mirror = None  # set to chessnet.mirror_lr_table() to augment
+        self.rng = np.random.default_rng(1)
 
     def __len__(self):
         return len(self.idx)
@@ -46,6 +48,12 @@ class Split:
             lm = self.legal[self.off[k]:self.off[k + 1]].astype(np.int64)
             mask[r, lm] = True
             tgt[r] = lm[self.target[k]]
+        if self.mirror is not None:  # left-right mirror half of the positions without castling rights
+            flip = ~x[:, 12:16].any(axis=(1, 2, 3)) & (self.rng.random(len(j)) < 0.5)
+            if flip.any():
+                x[flip] = x[flip][:, :, :, ::-1]
+                mask[flip] = mask[flip][:, self.mirror]  # the table is its own inverse
+                tgt[flip] = self.mirror[tgt[flip]]
         return torch.from_numpy(x.astype(np.float32)), torch.from_numpy(self.elo[j]), torch.from_numpy(mask), torch.from_numpy(tgt)
 
 
@@ -121,6 +129,7 @@ if __name__ == "__main__":
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--tag", default="")
     ap.add_argument("--device", default="auto", help="auto, cpu, mps or cuda")
+    ap.add_argument("--mirror", action="store_true", help="left-right mirror augmentation for positions without castling rights")
     ap.add_argument("--train-shards", default="", help="folder of Lichess shards to train on instead of the cohort games")
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
@@ -137,6 +146,8 @@ if __name__ == "__main__":
     n_val = max(1000, len(perm) // 50)
     train, val = Split(z, "train_", perm[n_val:]), Split(z, "train_", perm[:n_val])
     test = Split(z, "test_")
+    if a.mirror:
+        train.mirror = chessnet.mirror_lr_table()
     net = chessnet.build(a.blocks, a.channels).to(DEV)
     n_par = sum(p.numel() for p in net.parameters())
     steps = a.epochs * (len(train) // a.batch)

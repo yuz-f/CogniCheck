@@ -54,6 +54,22 @@ def test_planes_mirror():
     assert p_black[0].sum() == 8 and p_black[6].sum() == 8
 
 
+def test_mirror_lr_table():
+    perm = chessnet.mirror_lr_table()
+    assert (perm[perm] == np.arange(chessnet.N_MOVES)).all()
+    checked = 0
+    for b in _random_positions(300, seed=1):
+        if b.has_castling_rights(chess.WHITE) or b.has_castling_rights(chess.BLACK):
+            continue
+        bm = b.transform(chess.flip_horizontal)
+        _, idx = chessnet.legal_indices(b)
+        _, idxm = chessnet.legal_indices(bm)
+        assert set(perm[idx].tolist()) == set(idxm.tolist())
+        assert (chessnet.planes(b).reshape(17, 8, 8)[:, :, ::-1] == chessnet.planes(bm).reshape(17, 8, 8)).all()
+        checked += 1
+    assert checked > 50
+
+
 if __name__ == "__main__":  # lets an editor's Run button run these tests
     import pytest
 

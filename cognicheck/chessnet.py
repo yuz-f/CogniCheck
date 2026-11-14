@@ -80,6 +80,30 @@ def legal_indices(board: chess.Board) -> tuple[list[chess.Move], np.ndarray]:
     return moves, np.array([move_index(m, board.turn) for m in moves], dtype=np.int16)
 
 
+def mirror_lr_table() -> np.ndarray:
+    """Move-index permutation for a left-right (a-file <-> h-file) mirror of the board.
+
+    Valid as data augmentation only for positions without castling rights, where the mirrored
+    position is equally legal and strategically equivalent."""
+    perm = np.arange(N_MOVES)
+    for t in range(N_TYPES):
+        for sq in range(64):
+            r, f = divmod(sq, 8)
+            msq = r * 8 + (7 - f)
+            if t < 56:
+                d, dist = divmod(t, 7)
+                dr, dc = _DIRS[d]
+                mt = _DIRS.index((dr, -dc)) * 7 + dist
+            elif t < 64:
+                dr, dc = _KNIGHT[t - 56]
+                mt = 56 + _KNIGHT.index((dr, -dc))
+            else:
+                piece, dc1 = divmod(t - 64, 3)  # dc1 = dc + 1
+                mt = 64 + 3 * piece + (2 - dc1)
+            perm[t * 64 + sq] = mt * 64 + msq
+    return perm
+
+
 def elo_input(elo_self: float, elo_oppo: float) -> np.ndarray:
     return np.array([(elo_self - 1500.0) / 500.0, (elo_oppo - 1500.0) / 500.0], dtype=np.float32)
 
