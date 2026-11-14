@@ -77,7 +77,7 @@ def player_data(p, exclude):
             recs = encode_game(pg.game, lambda ply, b: True)
             k += sum(1 for r in recs if r[5].turn == color)
             if site(pg.game) not in exclude:
-                train.extend((planes, elo, idx, tgt, site(pg.game)) for planes, elo, idx, tgt, ply, board in recs)
+                train.extend((planes, elo, idx, tgt, site(pg.game), board.turn, color) for planes, elo, idx, tgt, ply, board in recs)
     if k != len(starts):
         raise RuntimeError(f"{p['id']}: {k} decisions vs {len(starts)} in the analysis")
     return p["id"], train, test
@@ -113,14 +113,20 @@ if __name__ == "__main__":
     print(f"{len(exclude)} games excluded from training (held out or lockbox)", file=sys.stderr)
     with ProcessPoolExecutor(4, mp_context=multiprocessing.get_context("spawn")) as ex:
         res = list(ex.map(player_data, players, [exclude] * len(players)))
-    seen, train, test = set(), [], []
+    # mover of each training position: the cohort player's index for their own moves, len(res) (a
+    # shared "unknown" slot) for anyone else; a game shared by two cohort players is kept once,
+    # with both players' moves labelled
+    owner = {(r[4], r[6]): pi for pi, (pid, tr, te) in enumerate(res) for r in tr}
+    seen, train, test, tr_player = set(), [], [], []
     for pi, (pid, tr, te) in enumerate(res):
         new_sites = {r[4] for r in tr} - seen
-        train.extend(r for r in tr if r[4] in new_sites)  # each game once, even if two cohort players share it
+        kept = [r for r in tr if r[4] in new_sites]  # each game once, even if two cohort players share it
+        train.extend(kept)
+        tr_player.extend(owner.get((r[4], r[5]), len(res)) for r in kept)
         seen |= new_sites
         test.extend((*r, pi) for r in te)
     OUT.mkdir(parents=True, exist_ok=True)
-    tr = pack(train, {})
+    tr = pack(train, {"player": np.array(tr_player, np.int16)})
     te = pack(test, {"phase": np.array([r[4] for r in test], np.int8), "blunder": np.array([r[5] for r in test]),
                      "decision": np.array([r[6] for r in test], np.int32), "player": np.array([r[7] for r in test], np.int16)})
     np.savez(OUT / "cohort.npz", **{"train_" + k: v for k, v in tr.items()}, **{"test_" + k: v for k, v in te.items()},

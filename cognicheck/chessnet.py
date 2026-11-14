@@ -10,6 +10,11 @@ as 17 planes of 8x8:
 
 Both ratings enter as two numbers that shift every channel of the first layer.
 
+Optionally (n_players > 0) the network also knows who is moving: each player has a learned vector
+that shifts the first layer like the ratings, and a learned bias over the 4672 moves (a personal
+taste for particular moves, e.g. "likes 1.e4"). Index n_players is a shared slot for anyone else.
+Both start at zero, so a network trained without players is the starting point.
+
 Moves use the AlphaZero layout: 73 move types for each of the 64 from-squares (index =
 type * 64 + from). Types 0-55 are queen-like moves (8 directions x 7 distances; this includes
 pawn moves and queen promotions), 56-63 knight jumps, 64-72 under-promotions (3 directions x
@@ -109,7 +114,7 @@ def elo_input(elo_self: float, elo_oppo: float) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------- network (torch)
-def build(blocks: int = 6, channels: int = 64):
+def build(blocks: int = 6, channels: int = 64, n_players: int = 0):
     import torch
     from torch import nn
 
@@ -126,19 +131,29 @@ def build(blocks: int = 6, channels: int = 64):
     class Net(nn.Module):
         def __init__(self):
             super().__init__()
-            self.cfg = {"blocks": blocks, "channels": channels}
+            self.cfg = {"blocks": blocks, "channels": channels, "n_players": n_players}
             self.stem = nn.Conv2d(N_PLANES, channels, 3, padding=1, bias=False)
             self.stem_bn = nn.BatchNorm2d(channels)
             self.elo = nn.Linear(2, channels)
             self.body = nn.Sequential(*[Block(channels) for _ in range(blocks)])
             self.p1 = nn.Conv2d(channels, channels, 1)
             self.p2 = nn.Conv2d(channels, N_TYPES, 1)
+            if n_players:
+                self.pl_vec = nn.Embedding(n_players + 1, channels)
+                self.pl_bias = nn.Embedding(n_players + 1, N_MOVES)
+                nn.init.zeros_(self.pl_vec.weight)
+                nn.init.zeros_(self.pl_bias.weight)
 
-        def forward(self, x, elo, mask):
-            """x: (B,17,8,8) float, elo: (B,2), mask: (B,4672) bool of legal moves -> masked logits."""
+        def forward(self, x, elo, mask, player=None):
+            """x: (B,17,8,8) float, elo: (B,2), mask: (B,4672) bool of legal moves, player: (B,) long
+            (only with n_players) -> masked logits."""
             h = self.stem_bn(self.stem(x)) + self.elo(elo)[:, :, None, None]
+            if n_players and player is not None:
+                h = h + self.pl_vec(player)[:, :, None, None]
             h = self.body(torch.relu(h))
             logits = self.p2(torch.relu(self.p1(h))).flatten(1)  # (B, 73*64), index = type*64 + square
+            if n_players and player is not None:
+                logits = logits + self.pl_bias(player)
             return logits.masked_fill(~mask, -1e9)
 
     return Net()
