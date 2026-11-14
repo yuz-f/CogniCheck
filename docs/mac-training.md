@@ -29,7 +29,7 @@ python scripts/net_train.py --limit 60000 --epochs 1 --device mps --tag speed_mp
 python scripts/net_train.py --limit 60000 --epochs 1 --device cpu --tag speed_cpu
 ```
 
-Compare the seconds in the two `epoch 1:` lines. The cloud machine needs about 270 seconds for
+Compare the seconds in the two `epoch 1:` lines. The cloud machine needs about 45 seconds for
 that amount of data. If `mps` is not clearly faster than `cpu` on your Mac, use `--device cpu` below.
 
 ## 3. Stage B data: 20 million Lichess positions (about 1 hour)
