@@ -2,6 +2,7 @@
 
   python scripts/net_train.py --data data/real/net/cohort.npz --blocks 6 --channels 64 --epochs 8
   python scripts/net_train.py --train-shards data/real/net/lichess --epochs 2 --device mps   # stage B on a Mac
+  python scripts/net_train.py --init data/real/net/net_B_b6c64.pt --epochs 3 --lr 5e-4 --tag D_cohort   # fine-tune on the cohort
 
 --device auto picks Apple's GPU (mps) or CUDA when present, else the CPU. With --train-shards the
 network trains on the Lichess shards (scripts/net_lichess.py) and is still tested on the cohort.
@@ -129,6 +130,7 @@ if __name__ == "__main__":
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--tag", default="")
     ap.add_argument("--device", default="auto", help="auto, cpu, mps or cuda")
+    ap.add_argument("--init", default="", help="start from a saved network (fine-tuning); its size overrides --blocks/--channels")
     ap.add_argument("--mirror", action="store_true", help="left-right mirror augmentation for positions without castling rights")
     ap.add_argument("--train-shards", default="", help="folder of Lichess shards to train on instead of the cohort games")
     a = ap.parse_args()
@@ -148,7 +150,14 @@ if __name__ == "__main__":
     test = Split(z, "test_")
     if a.mirror:
         train.mirror = chessnet.mirror_lr_table()
-    net = chessnet.build(a.blocks, a.channels).to(DEV)
+    if a.init:
+        ck0 = torch.load(a.init, map_location="cpu")
+        net = chessnet.build(ck0["cfg"]["blocks"], ck0["cfg"]["channels"])
+        net.load_state_dict(ck0["state"])
+        net = net.to(DEV)
+        print(f"starting from {a.init}", file=sys.stderr)
+    else:
+        net = chessnet.build(a.blocks, a.channels).to(DEV)
     n_par = sum(p.numel() for p in net.parameters())
     steps = a.epochs * (len(train) // a.batch)
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
