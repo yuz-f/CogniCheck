@@ -1,9 +1,12 @@
 import random
+import sys
+from pathlib import Path
 
 import chess
 import numpy as np
 
-from cognicheck import chessnet
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # also works when run as a plain file
+from cognicheck import chessnet  # noqa: E402
 
 
 def _random_positions(n, seed=0):
@@ -49,3 +52,10 @@ def test_planes_mirror():
     b2 = chess.Board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1").mirror()
     assert np.array_equal(p_black[:12], chessnet.planes(b2)[:12])
     assert p_black[0].sum() == 8 and p_black[6].sum() == 8
+
+
+if __name__ == "__main__":  # lets an editor's Run button run these tests
+    import pytest
+
+    root = Path(__file__).resolve().parent.parent
+    sys.exit(pytest.main(["-q", str(Path(__file__)), "--rootdir", str(root)]))
