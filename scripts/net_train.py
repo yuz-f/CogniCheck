@@ -5,6 +5,7 @@
   python scripts/net_train.py --init data/real/net/net_B_b6c64.pt --epochs 3 --lr 5e-4 --tag D_cohort   # fine-tune on the cohort
   python scripts/net_train.py --init data/real/net/net_B_b10c128.pt --players --epochs 3 --lr 5e-4 --tag P_b10c128   # ... knowing who moves
   python scripts/net_train.py --train-shards data/real/net/lichess --context --blocks 10 --channels 128 --mirror --epochs 2 --device mps --tag C_b10c128   # stage C
+  python scripts/net_train.py --train-shards data/real/net/lichess --context --arch transformer --blocks 8 --channels 256 --lr 1e-3 --mirror --epochs 2 --device mps --tag T_t8d256
 
 --device auto picks Apple's GPU (mps) or CUDA when present, else the CPU. With --train-shards the
 network trains on the Lichess shards (scripts/net_lichess.py) and is still tested on the cohort.
@@ -164,6 +165,9 @@ if __name__ == "__main__":
     ap.add_argument("--init", default="", help="start from a saved network (fine-tuning); its size overrides --blocks/--channels")
     ap.add_argument("--players", action="store_true", help="give the network the mover's identity (cohort data only)")
     ap.add_argument("--player-lr", type=float, default=10.0, help="learning-rate multiplier for the new player parameters")
+    ap.add_argument("--arch", default="resnet", help="resnet or transformer (then --blocks = layers, --channels = width)")
+    ap.add_argument("--heads", type=int, default=8)
+    ap.add_argument("--wd", type=float, default=1e-4, help="weight decay (0.01 suits the transformer)")
     ap.add_argument("--context", action="store_true", help="stage C: last moves and clocks as input, think time as second output")
     ap.add_argument("--think-weight", type=float, default=0.1, help="weight of the think-time loss (with --context)")
     ap.add_argument("--mirror", action="store_true", help="left-right mirror augmentation for positions without castling rights")
@@ -203,22 +207,23 @@ if __name__ == "__main__":
         train.mirror = chessnet.mirror_lr_table()
     if a.init:
         ck0 = torch.load(a.init, map_location="cpu")
-        net = chessnet.build(ck0["cfg"]["blocks"], ck0["cfg"]["channels"], n_pl or ck0["cfg"].get("n_players", 0), ck0["cfg"].get("hist", 0))
+        c0 = ck0["cfg"]
+        net = chessnet.build(c0["blocks"], c0["channels"], n_pl or c0.get("n_players", 0), c0.get("hist", 0), c0.get("arch", "resnet"), c0.get("heads", 8))
         missing, _ = net.load_state_dict(ck0["state"], strict=False)
         if any(not k.startswith("pl_") for k in missing):
             sys.exit(f"{a.init} does not fit: missing {missing}")
         net = net.to(DEV)
         print(f"starting from {a.init}" + (f", new player parameters for {n_pl} players" if missing else ""), file=sys.stderr)
     else:
-        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0).to(DEV)
+        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0, a.arch, a.heads).to(DEV)
     n_par = sum(p.numel() for p in net.parameters())
     steps = a.epochs * (len(train) // a.batch)
     pl_par = [p for k, p in net.named_parameters() if k.startswith("pl_")]
     rest = [p for k, p in net.named_parameters() if not k.startswith("pl_")]
     groups = [{"params": rest, "lr": a.lr}] + ([{"params": pl_par, "lr": a.lr * a.player_lr, "weight_decay": 0.0}] if pl_par else [])
-    opt = torch.optim.AdamW(groups, lr=a.lr, weight_decay=1e-4)
+    opt = torch.optim.AdamW(groups, lr=a.lr, weight_decay=a.wd)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[g["lr"] for g in groups], total_steps=steps, pct_start=0.05)
-    name = a.tag or f"b{a.blocks}c{a.channels}"
+    name = a.tag or (f"t{a.blocks}d{a.channels}" if a.arch == "transformer" else f"b{a.blocks}c{a.channels}")
     out = Path(a.data).parent / f"net_{name}.pt"
     print(f"{n_par:,} parameters, {len(train):,} training positions, {steps:,} steps, device {DEV}", file=sys.stderr)
     best, t0, step = 1e9, time.time(), 0

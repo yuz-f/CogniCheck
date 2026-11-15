@@ -193,9 +193,16 @@ def elo_input(elo_self: float, elo_oppo: float) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------- network (torch)
-def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0):
+def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0, arch: str = "resnet", heads: int = 8):
+    """arch "resnet": `blocks` residual blocks of `channels` 3x3 convolutions.
+    arch "transformer": the 64 squares are tokens of width `channels`; `blocks` pre-norm attention
+    layers with `heads` heads, each with a learned bias for every (square, square) pair and head, so
+    a layer can relate any two squares (a pin along a diagonal, a back-rank threat) in one step."""
     import torch
     from torch import nn
+
+    if arch == "transformer":
+        return _build_transformer(torch, nn, blocks, channels, n_players, hist, heads)
 
     class Block(nn.Module):
         def __init__(self, c):
@@ -242,6 +249,61 @@ def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0
             logits = logits.masked_fill(~mask, -1e9)
             if aux:
                 think = self.t2(torch.relu(self.t1(h.mean((2, 3))))).squeeze(1) if hist else None
+                return logits, think
+            return logits
+
+    return Net()
+
+
+def _build_transformer(torch, nn, layers, d, n_players, hist, heads):
+    class Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.n1, self.n2 = nn.LayerNorm(d), nn.LayerNorm(d)
+            self.qkv, self.out = nn.Linear(d, 3 * d), nn.Linear(d, d)
+            self.bias = nn.Parameter(torch.zeros(heads, 64, 64))  # learned square-to-square attention bias
+            self.ff = nn.Sequential(nn.Linear(d, 4 * d), nn.GELU(), nn.Linear(4 * d, d))
+
+        def forward(self, h):
+            b = h.shape[0]
+            q, k, v = self.qkv(self.n1(h)).view(b, 64, 3, heads, d // heads).permute(2, 0, 3, 1, 4)
+            att = torch.softmax(q @ k.transpose(-1, -2) / (d // heads) ** 0.5 + self.bias, dim=-1)
+            h = h + self.out((att @ v).transpose(1, 2).reshape(b, 64, d))
+            return h + self.ff(self.n2(h))
+
+    class Net(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cfg = {"blocks": layers, "channels": d, "n_players": n_players, "hist": hist, "arch": "transformer", "heads": heads}
+            self.embed = nn.Linear(N_PLANES + 2 * hist, d)
+            self.pos = nn.Parameter(torch.randn(64, d) * 0.02)
+            self.elo = nn.Linear(2, d)
+            self.body = nn.Sequential(*[Layer() for _ in range(layers)])
+            self.norm = nn.LayerNorm(d)
+            self.head = nn.Linear(d, N_TYPES)  # per square: logits of its 73 move types
+            if hist:
+                self.ctx = nn.Linear(N_CTX, d)
+                self.t1, self.t2 = nn.Linear(d, 64), nn.Linear(64, 1)
+            if n_players:
+                self.pl_vec = nn.Embedding(n_players + 1, d)
+                self.pl_bias = nn.Embedding(n_players + 1, N_MOVES)
+                nn.init.zeros_(self.pl_vec.weight)
+                nn.init.zeros_(self.pl_bias.weight)
+
+        def forward(self, x, elo, mask, player=None, ctx=None, aux=False):
+            tok = x.flatten(2).transpose(1, 2)  # (B, 64 squares, planes), square = rank * 8 + file
+            h = self.embed(tok) + self.pos + self.elo(elo)[:, None, :]
+            if hist:
+                h = h + self.ctx(ctx)[:, None, :]
+            if n_players and player is not None:
+                h = h + self.pl_vec(player)[:, None, :]
+            h = self.norm(self.body(h))
+            logits = self.head(h).transpose(1, 2).flatten(1)  # (B, 73*64), index = type*64 + square
+            if n_players and player is not None:
+                logits = logits + self.pl_bias(player)
+            logits = logits.masked_fill(~mask, -1e9)
+            if aux:
+                think = self.t2(torch.relu(self.t1(h.mean(1)))).squeeze(1) if hist else None
                 return logits, think
             return logits
 
