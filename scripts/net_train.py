@@ -175,6 +175,7 @@ if __name__ == "__main__":
     ap.add_argument("--init", default="", help="start from a saved network (fine-tuning); its size overrides --blocks/--channels")
     ap.add_argument("--players", action="store_true", help="give the network the mover's identity (cohort data only)")
     ap.add_argument("--memory", action="store_true", help="with --players: the player's own past moves in the same position as input")
+    ap.add_argument("--lapse", action="store_true", help="mixture output: normal policy + learned lapse policy with a gate")
     ap.add_argument("--player-lr", type=float, default=10.0, help="learning-rate multiplier for the new player parameters")
     ap.add_argument("--arch", default="resnet", help="resnet or transformer (then --blocks = layers, --channels = width)")
     ap.add_argument("--heads", type=int, default=8)
@@ -243,14 +244,14 @@ if __name__ == "__main__":
         ck0 = torch.load(a.init, map_location="cpu")
         c0 = ck0["cfg"]
         net = chessnet.build(c0["blocks"], c0["channels"], n_pl or c0.get("n_players", 0), c0.get("hist", 0), c0.get("arch", "resnet"), c0.get("heads", 8), c0.get("stem", 0),
-                             a.memory or c0.get("memory", False))
+                             a.memory or c0.get("memory", False), a.lapse or c0.get("lapse", False))
         missing, _ = net.load_state_dict(ck0["state"], strict=False)
-        if any(not k.startswith("pl_") for k in missing):
+        if any(not k.startswith(("pl_", "lapse_")) for k in missing):
             sys.exit(f"{a.init} does not fit: missing {missing}")
         net = net.to(DEV)
-        print(f"starting from {a.init}" + (f", new player parameters for {n_pl} players" if missing else ""), file=sys.stderr)
+        print(f"starting from {a.init}" + (f", new parameters: {sorted({k.split('.')[0] for k in missing})}" if missing else ""), file=sys.stderr)
     else:
-        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0, a.arch, a.heads, a.stem, a.memory).to(DEV)
+        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0, a.arch, a.heads, a.stem, a.memory, a.lapse).to(DEV)
     n_par = sum(p.numel() for p in net.parameters())
     steps = a.epochs * (len(train) // a.batch)
     pl_par = [p for k, p in net.named_parameters() if k.startswith("pl_")]

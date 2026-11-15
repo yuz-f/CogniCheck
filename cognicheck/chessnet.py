@@ -20,6 +20,12 @@ each legal move, how often this player chose it in exactly this position in thei
 (personal_memory()). A small learned function of those counts is added to the move's logit, so
 "played Nf3 here 7 times out of 9" can raise Nf3 directly; it starts at zero.
 
+Optionally (lapse=True) the output is a mixture of two move distributions: the normal policy and a
+learned "lapse" policy, weighted by a gate eps in (0, 1) computed from the position and its
+context: p = (1 - eps) * policy + eps * lapse. The gate starts almost closed (eps ~ 2%) and the
+lapse policy starts uniform over the legal moves; forward() then returns log-probabilities
+(already normalised, so log_softmax leaves them unchanged), and lapse_eps(...) gives eps.
+
 Optionally (n_players > 0) the network also knows who is moving: each player has a learned vector
 that shifts the first layer like the ratings, and a learned bias over the 4672 moves (a personal
 taste for particular moves, e.g. "likes 1.e4"). Index n_players is a shared slot for anyone else.
@@ -225,6 +231,24 @@ def _memory_bias(torch, layer, mem):
     return layer(f).squeeze(-1)
 
 
+def _add_lapse(torch, nn, net, width, conv):
+    net.lapse_head = nn.Conv2d(width, N_TYPES, 1) if conv else nn.Linear(width, N_TYPES)
+    net.lapse_gate = nn.Linear(width, 1)
+    for m in (net.lapse_head, net.lapse_gate):
+        nn.init.zeros_(m.weight)
+        nn.init.zeros_(m.bias)
+    nn.init.constant_(net.lapse_gate.bias, -4.0)
+
+
+def _mix_lapse(torch, net, logits, lapse_logits, pooled, mask):
+    """log((1 - eps) softmax(logits) + eps softmax(lapse_logits)), with both masked to legal moves."""
+    eps = torch.sigmoid(net.lapse_gate(pooled.float()))
+    net.last_eps = eps.squeeze(1).detach()
+    lp = torch.log_softmax(logits.masked_fill(~mask, -1e9), 1)
+    lq = torch.log_softmax(lapse_logits.float().masked_fill(~mask, -1e9), 1)
+    return torch.logaddexp(torch.log1p(-eps) + lp, torch.log(eps) + lq)
+
+
 def history_planes(hist: np.ndarray) -> np.ndarray:
     """(B, n_hist, 2) squares -> (B, 2 * n_hist, 8, 8) uint8 planes (from, to for each move)."""
     b = len(hist)
@@ -241,7 +265,7 @@ def elo_input(elo_self: float, elo_oppo: float) -> np.ndarray:
 
 # ---------------------------------------------------------------------------- network (torch)
 def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0, arch: str = "resnet", heads: int = 8,
-          stem: int = 0, memory: bool = False):
+          stem: int = 0, memory: bool = False, lapse: bool = False):
     """arch "resnet": `blocks` residual blocks of `channels` 3x3 convolutions.
     arch "transformer": the 64 squares are tokens of width `channels`; `blocks` pre-norm attention
     layers with `heads` heads, each with a learned bias for every (square, square) pair and head, so
@@ -260,6 +284,9 @@ def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0
         nn.init.zeros_(net.pl_mem.weight)
         nn.init.zeros_(net.pl_mem.bias)
     net.cfg["memory"] = memory
+    if lapse:
+        _add_lapse(torch, nn, net, channels, arch != "transformer")
+    net.cfg["lapse"] = lapse
     return net
 
 
@@ -313,6 +340,8 @@ def _build_resnet(torch, nn, Block, blocks, channels, n_players, hist):
             logits = logits.float()
             if mem is not None and hasattr(self, "pl_mem"):
                 logits = logits + _memory_bias(torch, self.pl_mem, mem)
+            if hasattr(self, "lapse_gate"):
+                logits = _mix_lapse(torch, self, logits, self.lapse_head(h).flatten(1), h.mean((2, 3)), mask)
             logits = logits.masked_fill(~mask, -1e9)
             if aux:
                 think = self.t2(torch.relu(self.t1(h.mean((2, 3))))).squeeze(1) if hist else None
@@ -383,6 +412,8 @@ def _build_transformer(torch, nn, layers, d, n_players, hist, heads, stem, Block
             logits = logits.float()
             if mem is not None and hasattr(self, "pl_mem"):
                 logits = logits + _memory_bias(torch, self.pl_mem, mem)
+            if hasattr(self, "lapse_gate"):
+                logits = _mix_lapse(torch, self, logits, self.lapse_head(h).transpose(1, 2).flatten(1), h.mean(1), mask)
             logits = logits.masked_fill(~mask, -1e9)
             if aux:
                 think = self.t2(torch.relu(self.t1(h.mean(1)))).squeeze(1) if hist else None
