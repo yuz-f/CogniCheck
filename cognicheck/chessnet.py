@@ -10,6 +10,11 @@ as 17 planes of 8x8:
 
 Both ratings enter as two numbers that shift every channel of the first layer.
 
+Optionally (hist > 0, stage C) the network also sees what happened before: the from- and
+to-squares of the last `hist` moves as extra planes, and N_CTX context numbers (both clocks, the
+time each side spent on its previous move, whether the game has clocks, the move number); and it
+predicts as a second output how long the player will think about this move. See context().
+
 Optionally (n_players > 0) the network also knows who is moving: each player has a learned vector
 that shifts the first layer like the ratings, and a learned bias over the 4672 moves (a personal
 taste for particular moves, e.g. "likes 1.e4"). Index n_players is a shared slot for anyone else.
@@ -29,6 +34,8 @@ import numpy as np
 N_PLANES = 17
 N_TYPES = 73
 N_MOVES = N_TYPES * 64
+N_HIST = 8  # moves of history in stage C
+N_CTX = 6
 PIECES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 _DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]  # (rank, file) steps
 _KNIGHT = [(2, 1), (1, 2), (-1, 2), (-2, 1), (-2, -1), (-1, -2), (1, -2), (2, -1)]
@@ -109,12 +116,84 @@ def mirror_lr_table() -> np.ndarray:
     return perm
 
 
+def to_square_table() -> np.ndarray:
+    """to-square of every move index (-1 where the move would leave the board)."""
+    t = np.full(N_MOVES, -1, np.int16)
+    for typ in range(N_TYPES):
+        for sq in range(64):
+            r, f = divmod(sq, 8)
+            if typ < 56:
+                d, dist = divmod(typ, 7)
+                dr, dc = _DIRS[d][0] * (dist + 1), _DIRS[d][1] * (dist + 1)
+            elif typ < 64:
+                dr, dc = _KNIGHT[typ - 56]
+            else:
+                dr, dc = 1, (typ - 64) % 3 - 1
+            if 0 <= r + dr < 8 and 0 <= f + dc < 8:
+                t[typ * 64 + sq] = (r + dr) * 8 + f + dc
+    return t
+
+
+def context(game, ply, clock, legal, off, target, n_hist: int = N_HIST):
+    """Stage C inputs for rows that hold the positions of whole games, in order.
+
+    game, ply: (N,) ids; rows of a game are consecutive with increasing ply (positions with a single
+    legal move are absent, so their move counts as unknown). clock: (N, 2) mover's and opponent's
+    clock before the move, as a fraction of the base time (NaN for games without clocks).
+    Returns
+      hist  (N, n_hist, 2) uint8: from- and to-square of the move j plies ago, in the current
+            mover's frame (255 = unknown)
+      ctx   (N, N_CTX) float32: own clock, opponent clock, own previous think, opponent's last
+            think, has-clock flag, ply / 100
+      think (N,) float32: time this move took, x10 of the base time, clipped to [0, 5] (NaN = unknown)
+    """
+    n = len(ply)
+    key = game.astype(np.int64) * 256 + ply.astype(np.int64)
+    if n > 1 and not np.all(np.diff(key) > 0):
+        raise ValueError("rows must be whole games in ply order")
+    mv = legal[off[:-1] + target].astype(np.int64)
+    fr, to = (mv % 64).astype(np.int16), to_square_table()[mv]
+
+    def row(j):  # row of ply - j in the same game, -1 if absent
+        want = key - j
+        pos = np.searchsorted(key, want).clip(0, max(n - 1, 0))
+        return np.where(key[pos] == want, pos, -1)
+
+    hist = np.full((n, n_hist, 2), 255, np.uint8)
+    for j in range(1, n_hist + 1):
+        r = row(j)
+        ok = r >= 0
+        f, t = fr[r[ok]], to[r[ok]]
+        if j % 2:  # the opponent's move: their frame is mirrored relative to ours
+            f, t = f ^ 56, t ^ 56
+        hist[ok, j - 1, 0], hist[ok, j - 1, 1] = f, t
+    c = clock.astype(np.float32)
+    has = ~np.isnan(c).any(1)
+    r1, r2, n1 = row(1), row(2), row(-1)
+    own_think = np.where((r2 >= 0) & has, c[r2, 0] - c[:, 0], 0.0)
+    opp_think = np.where((r1 >= 0) & has, c[r1, 0] - c[:, 1], 0.0)
+    ctx = np.stack([np.where(has, c[:, 0], 0.0), np.where(has, c[:, 1], 0.0), np.nan_to_num(own_think).clip(-0.1, 1),
+                    np.nan_to_num(opp_think).clip(-0.1, 1), has.astype(np.float32), ply / 100.0], 1).astype(np.float32)
+    think = np.where((n1 >= 0) & has, (c[:, 0] - c[n1, 1]) * 10, np.nan).clip(0, 5).astype(np.float32)
+    return hist, ctx, think
+
+
+def history_planes(hist: np.ndarray) -> np.ndarray:
+    """(B, n_hist, 2) squares -> (B, 2 * n_hist, 8, 8) uint8 planes (from, to for each move)."""
+    b = len(hist)
+    h = hist.reshape(b, -1)
+    out = np.zeros((b, h.shape[1], 64), np.uint8)
+    bi, ki = np.nonzero(h != 255)
+    out[bi, ki, h[bi, ki]] = 1
+    return out.reshape(b, -1, 8, 8)
+
+
 def elo_input(elo_self: float, elo_oppo: float) -> np.ndarray:
     return np.array([(elo_self - 1500.0) / 500.0, (elo_oppo - 1500.0) / 500.0], dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------- network (torch)
-def build(blocks: int = 6, channels: int = 64, n_players: int = 0):
+def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0):
     import torch
     from torch import nn
 
@@ -131,29 +210,39 @@ def build(blocks: int = 6, channels: int = 64, n_players: int = 0):
     class Net(nn.Module):
         def __init__(self):
             super().__init__()
-            self.cfg = {"blocks": blocks, "channels": channels, "n_players": n_players}
-            self.stem = nn.Conv2d(N_PLANES, channels, 3, padding=1, bias=False)
+            self.cfg = {"blocks": blocks, "channels": channels, "n_players": n_players, "hist": hist}
+            self.stem = nn.Conv2d(N_PLANES + 2 * hist, channels, 3, padding=1, bias=False)
             self.stem_bn = nn.BatchNorm2d(channels)
             self.elo = nn.Linear(2, channels)
             self.body = nn.Sequential(*[Block(channels) for _ in range(blocks)])
             self.p1 = nn.Conv2d(channels, channels, 1)
             self.p2 = nn.Conv2d(channels, N_TYPES, 1)
+            if hist:
+                self.ctx = nn.Linear(N_CTX, channels)
+                self.t1, self.t2 = nn.Linear(channels, 64), nn.Linear(64, 1)  # think-time head
             if n_players:
                 self.pl_vec = nn.Embedding(n_players + 1, channels)
                 self.pl_bias = nn.Embedding(n_players + 1, N_MOVES)
                 nn.init.zeros_(self.pl_vec.weight)
                 nn.init.zeros_(self.pl_bias.weight)
 
-        def forward(self, x, elo, mask, player=None):
-            """x: (B,17,8,8) float, elo: (B,2), mask: (B,4672) bool of legal moves, player: (B,) long
-            (only with n_players) -> masked logits."""
+        def forward(self, x, elo, mask, player=None, ctx=None, aux=False):
+            """x: (B,17+2*hist,8,8) float, elo: (B,2), mask: (B,4672) bool of legal moves, player: (B,)
+            long (only with n_players), ctx: (B,N_CTX) (only with hist) -> masked logits, and with
+            aux=True also the predicted think time (B,)."""
             h = self.stem_bn(self.stem(x)) + self.elo(elo)[:, :, None, None]
+            if hist:
+                h = h + self.ctx(ctx)[:, :, None, None]
             if n_players and player is not None:
                 h = h + self.pl_vec(player)[:, :, None, None]
             h = self.body(torch.relu(h))
             logits = self.p2(torch.relu(self.p1(h))).flatten(1)  # (B, 73*64), index = type*64 + square
             if n_players and player is not None:
                 logits = logits + self.pl_bias(player)
-            return logits.masked_fill(~mask, -1e9)
+            logits = logits.masked_fill(~mask, -1e9)
+            if aux:
+                think = self.t2(torch.relu(self.t1(h.mean((2, 3))))).squeeze(1) if hist else None
+                return logits, think
+            return logits
 
     return Net()

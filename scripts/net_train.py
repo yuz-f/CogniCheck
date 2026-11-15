@@ -4,6 +4,7 @@
   python scripts/net_train.py --train-shards data/real/net/lichess --epochs 2 --device mps   # stage B on a Mac
   python scripts/net_train.py --init data/real/net/net_B_b6c64.pt --epochs 3 --lr 5e-4 --tag D_cohort   # fine-tune on the cohort
   python scripts/net_train.py --init data/real/net/net_B_b10c128.pt --players --epochs 3 --lr 5e-4 --tag P_b10c128   # ... knowing who moves
+  python scripts/net_train.py --train-shards data/real/net/lichess --context --blocks 10 --channels 128 --mirror --epochs 2 --device mps --tag C_b10c128   # stage C
 
 --device auto picks Apple's GPU (mps) or CUDA when present, else the CPU. With --train-shards the
 network trains on the Lichess shards (scripts/net_lichess.py) and is still tested on the cohort.
@@ -34,11 +35,16 @@ class Split:
         self.off = z[prefix + "off"]
         self.legal = z[prefix + "legal"]  # int16; converted per batch to save memory (20M positions: 1.3 GB instead of 5.4 GB)
         self.target = z[prefix + "target"]
-        self.player = z.get(prefix + "player")  # mover's cohort index (n_players = anyone else), or None
+        self.player = z.get(prefix + "mover", z.get(prefix + "player"))  # mover's cohort index (n_players = anyone else), or None
         self.unknown = 0
+        self.hist = self.ctx = self.think = None  # stage C inputs (chessnet.context), set by add_context()
         self.idx = np.arange(len(self.target)) if idx is None else idx
         self.mirror = None  # set to chessnet.mirror_lr_table() to augment
         self.rng = np.random.default_rng(1)
+
+    def add_context(self, z, prefix):
+        self.hist, self.ctx, self.think = chessnet.context(z[prefix + "game"], z[prefix + "ply"], z[prefix + "clock"],
+                                                           self.legal, self.off, self.target)
 
     def __len__(self):
         return len(self.idx)
@@ -46,6 +52,8 @@ class Split:
     def batch(self, j):
         """Tensors for positions j (indices into the full split)."""
         x = np.unpackbits(self.planes[j], axis=1)[:, : chessnet.N_PLANES * 64].reshape(-1, chessnet.N_PLANES, 8, 8)
+        if self.hist is not None:
+            x = np.concatenate([x, chessnet.history_planes(self.hist[j])], axis=1)
         mask = np.zeros((len(j), chessnet.N_MOVES), dtype=bool)
         tgt = np.empty(len(j), np.int64)
         for r, k in enumerate(j):
@@ -61,8 +69,10 @@ class Split:
                 mask[flip] = mask[flip][:, self.mirror]  # the table is its own inverse
                 tgt[flip] = self.mirror[tgt[flip]]
         pl = self.player[j].astype(np.int64) if self.player is not None else np.full(len(j), self.unknown, np.int64)
+        ctx = self.ctx[j] if self.ctx is not None else np.zeros((len(j), chessnet.N_CTX), np.float32)
+        think = self.think[j] if self.think is not None else np.full(len(j), np.nan, np.float32)
         return (torch.from_numpy(x.astype(np.float32)), torch.from_numpy(self.elo[j]), torch.from_numpy(mask), torch.from_numpy(tgt),
-                torch.from_numpy(pl))
+                torch.from_numpy(pl), torch.from_numpy(ctx), torch.from_numpy(think))
 
 
 def load_shards(folder):
@@ -70,7 +80,9 @@ def load_shards(folder):
     files = sorted(Path(folder).glob("shard_*.npz"))
     parts = [np.load(f) for f in files]
     d = {"train_planes": np.concatenate([p["planes"] for p in parts]), "train_elo": np.concatenate([p["elo"] for p in parts]),
-         "train_legal": np.concatenate([p["legal"] for p in parts]), "train_target": np.concatenate([p["target"] for p in parts])}
+         "train_legal": np.concatenate([p["legal"] for p in parts]), "train_target": np.concatenate([p["target"] for p in parts]),
+         "train_game": np.concatenate([p["game"] for p in parts]), "train_ply": np.concatenate([p["ply"] for p in parts]),
+         "train_clock": np.concatenate([p["clock"] for p in parts])}
     offs, base = [], 0
     for p in parts:
         offs.append(p["off"][:-1] + base)
@@ -96,22 +108,34 @@ DEV = torch.device("cpu")
 def run_eval(net, split, bs=2048):
     """Per-position probability of the move played, hit flags (top-1, top-3) and max probability."""
     net.eval()
-    p_true, hit1, hit3 = [], [], []
+    p_true, hit1, hit3, th_p, th_t = [], [], [], [], []
     with torch.no_grad():
         for i in range(0, len(split), bs):
             j = split.idx[i:i + bs]
-            x, e, m, t, pl = (v.to(DEV) for v in split.batch(j))
-            logp = torch.log_softmax(net(x, e, m, pl), dim=1)
+            x, e, m, t, pl, c, th = (v.to(DEV) for v in split.batch(j))
+            logits, tp = net(x, e, m, pl, c, aux=True)
+            if tp is not None:
+                th_p.append(tp.cpu().numpy())
+                th_t.append(th.cpu().numpy())
+            logp = torch.log_softmax(logits, dim=1)
             p_true.append(logp.gather(1, t[:, None]).squeeze(1).exp().cpu().numpy())
             top = logp.topk(3, dim=1).indices
             hit1.append((top[:, 0] == t).cpu().numpy())
             hit3.append((top == t[:, None]).any(1).cpu().numpy())
     net.train()
+    if th_p:
+        tp, tt = np.concatenate(th_p), np.concatenate(th_t)
+        ok = np.isfinite(tt)
+        if ok.sum() > 2:
+            run_eval.think_r = float(np.corrcoef(tp[ok], tt[ok])[0, 1])
     return np.concatenate(p_true), np.concatenate(hit1).astype(float), np.concatenate(hit3).astype(float)
 
 
-def cohort_metrics(z, p_true, h1, h3):
-    player, ph, bl = z["test_player"], z["test_phase"], z["test_blunder"]
+run_eval.think_r = None
+
+
+def cohort_metrics(z, p_true, h1, h3, idx):
+    player, ph, bl = z["test_player"][idx], z["test_phase"][idx], z["test_blunder"][idx]
     rows = []
     for pi in np.unique(player):
         m = player == pi
@@ -140,6 +164,8 @@ if __name__ == "__main__":
     ap.add_argument("--init", default="", help="start from a saved network (fine-tuning); its size overrides --blocks/--channels")
     ap.add_argument("--players", action="store_true", help="give the network the mover's identity (cohort data only)")
     ap.add_argument("--player-lr", type=float, default=10.0, help="learning-rate multiplier for the new player parameters")
+    ap.add_argument("--context", action="store_true", help="stage C: last moves and clocks as input, think time as second output")
+    ap.add_argument("--think-weight", type=float, default=0.1, help="weight of the think-time loss (with --context)")
     ap.add_argument("--mirror", action="store_true", help="left-right mirror augmentation for positions without castling rights")
     ap.add_argument("--train-shards", default="", help="folder of Lichess shards to train on instead of the cohort games")
     a = ap.parse_args()
@@ -157,6 +183,15 @@ if __name__ == "__main__":
     n_val = max(1000, len(perm) // 50)
     train, val = Split(z, "train_", perm[n_val:]), Split(z, "train_", perm[:n_val])
     test = Split(z, "test_")
+    if "test_eval" in z:  # newer cohort files keep the opponents' moves of held-out games as history rows
+        test.idx = np.nonzero(z["test_eval"])[0]
+    if a.init and not a.context:
+        a.context = bool(torch.load(a.init, map_location="cpu")["cfg"].get("hist", 0))
+    if a.context:
+        train.add_context(z, "train_")
+        val.hist, val.ctx, val.think = train.hist, train.ctx, train.think
+        test.add_context(z, "test_")
+        print(f"stage C context: think time known for {np.isfinite(train.think).mean():.0%} of training positions", file=sys.stderr)
     n_pl = len(z["player_ids"]) if a.players else 0
     for sp in (train, val, test):
         sp.unknown = n_pl
@@ -168,14 +203,14 @@ if __name__ == "__main__":
         train.mirror = chessnet.mirror_lr_table()
     if a.init:
         ck0 = torch.load(a.init, map_location="cpu")
-        net = chessnet.build(ck0["cfg"]["blocks"], ck0["cfg"]["channels"], n_pl or ck0["cfg"].get("n_players", 0))
+        net = chessnet.build(ck0["cfg"]["blocks"], ck0["cfg"]["channels"], n_pl or ck0["cfg"].get("n_players", 0), ck0["cfg"].get("hist", 0))
         missing, _ = net.load_state_dict(ck0["state"], strict=False)
         if any(not k.startswith("pl_") for k in missing):
             sys.exit(f"{a.init} does not fit: missing {missing}")
         net = net.to(DEV)
         print(f"starting from {a.init}" + (f", new player parameters for {n_pl} players" if missing else ""), file=sys.stderr)
     else:
-        net = chessnet.build(a.blocks, a.channels, n_pl).to(DEV)
+        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0).to(DEV)
     n_par = sum(p.numel() for p in net.parameters())
     steps = a.epochs * (len(train) // a.batch)
     pl_par = [p for k, p in net.named_parameters() if k.startswith("pl_")]
@@ -190,8 +225,13 @@ if __name__ == "__main__":
     for ep in range(a.epochs):
         order = rng.permutation(train.idx)
         for i in range(0, len(order) - a.batch + 1, a.batch):
-            x, e, m, t, pl = (v.to(DEV) for v in train.batch(order[i:i + a.batch]))
-            loss = torch.nn.functional.cross_entropy(net(x, e, m, pl), t)
+            x, e, m, t, pl, c, th = (v.to(DEV) for v in train.batch(order[i:i + a.batch]))
+            logits, th_pred = net(x, e, m, pl, c, aux=True)
+            loss = torch.nn.functional.cross_entropy(logits, t)
+            if th_pred is not None and a.think_weight > 0:
+                ok = torch.isfinite(th)
+                if ok.any():
+                    loss = loss + a.think_weight * torch.nn.functional.smooth_l1_loss(th_pred[ok], th[ok])
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -209,7 +249,9 @@ if __name__ == "__main__":
     ck = torch.load(out, map_location=DEV)
     net.load_state_dict(ck["state"])
     pt, h1, h3 = run_eval(net, test)
-    summ, rows = cohort_metrics(z, pt, h1, h3)
+    summ, rows = cohort_metrics(z, pt, h1, h3, test.idx)
+    if run_eval.think_r is not None:
+        summ["think_r"] = run_eval.think_r
     print(f"\n{name}: {n_par:,} parameters. Cohort test decisions, mean over players:")
     print("  " + "  ".join(f"{k} {v:.4f}" for k, v in summ.items()))
     res = {"name": name, "parameters": n_par, "train_positions": len(train), "epochs": a.epochs, "val_logloss": best,
