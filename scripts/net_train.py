@@ -167,6 +167,7 @@ if __name__ == "__main__":
     ap.add_argument("--player-lr", type=float, default=10.0, help="learning-rate multiplier for the new player parameters")
     ap.add_argument("--arch", default="resnet", help="resnet or transformer (then --blocks = layers, --channels = width)")
     ap.add_argument("--heads", type=int, default=8)
+    ap.add_argument("--stem", type=int, default=0, help="transformer: conv blocks before the attention layers (hybrid)")
     ap.add_argument("--wd", type=float, default=1e-4, help="weight decay (0.01 suits the transformer)")
     ap.add_argument("--context", action="store_true", help="stage C: last moves and clocks as input, think time as second output")
     ap.add_argument("--think-weight", type=float, default=0.1, help="weight of the think-time loss (with --context)")
@@ -208,14 +209,14 @@ if __name__ == "__main__":
     if a.init:
         ck0 = torch.load(a.init, map_location="cpu")
         c0 = ck0["cfg"]
-        net = chessnet.build(c0["blocks"], c0["channels"], n_pl or c0.get("n_players", 0), c0.get("hist", 0), c0.get("arch", "resnet"), c0.get("heads", 8))
+        net = chessnet.build(c0["blocks"], c0["channels"], n_pl or c0.get("n_players", 0), c0.get("hist", 0), c0.get("arch", "resnet"), c0.get("heads", 8), c0.get("stem", 0))
         missing, _ = net.load_state_dict(ck0["state"], strict=False)
         if any(not k.startswith("pl_") for k in missing):
             sys.exit(f"{a.init} does not fit: missing {missing}")
         net = net.to(DEV)
         print(f"starting from {a.init}" + (f", new player parameters for {n_pl} players" if missing else ""), file=sys.stderr)
     else:
-        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0, a.arch, a.heads).to(DEV)
+        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0, a.arch, a.heads, a.stem).to(DEV)
     n_par = sum(p.numel() for p in net.parameters())
     steps = a.epochs * (len(train) // a.batch)
     pl_par = [p for k, p in net.named_parameters() if k.startswith("pl_")]

@@ -193,17 +193,24 @@ def elo_input(elo_self: float, elo_oppo: float) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------- network (torch)
-def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0, arch: str = "resnet", heads: int = 8):
+def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0, arch: str = "resnet", heads: int = 8,
+          stem: int = 0):
     """arch "resnet": `blocks` residual blocks of `channels` 3x3 convolutions.
     arch "transformer": the 64 squares are tokens of width `channels`; `blocks` pre-norm attention
     layers with `heads` heads, each with a learned bias for every (square, square) pair and head, so
-    a layer can relate any two squares (a pin along a diagonal, a back-rank threat) in one step."""
+    a layer can relate any two squares (a pin along a diagonal, a back-rank threat) in one step.
+    With stem > 0 the transformer first runs that many small residual conv blocks (64 channels), so
+    local patterns come cheaply and attention handles the long-range ones (a hybrid)."""
     import torch
     from torch import nn
 
     if arch == "transformer":
-        return _build_transformer(torch, nn, blocks, channels, n_players, hist, heads)
+        return _build_transformer(torch, nn, blocks, channels, n_players, hist, heads, stem, _block_class(torch, nn))
+    Block = _block_class(torch, nn)
+    return _build_resnet(torch, nn, Block, blocks, channels, n_players, hist)
 
+
+def _block_class(torch, nn):
     class Block(nn.Module):
         def __init__(self, c):
             super().__init__()
@@ -214,6 +221,10 @@ def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0
             y = torch.relu(self.b1(self.c1(x)))
             return torch.relu(x + self.b2(self.c2(y)))
 
+    return Block
+
+
+def _build_resnet(torch, nn, Block, blocks, channels, n_players, hist):
     class Net(nn.Module):
         def __init__(self):
             super().__init__()
@@ -255,7 +266,7 @@ def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0
     return Net()
 
 
-def _build_transformer(torch, nn, layers, d, n_players, hist, heads):
+def _build_transformer(torch, nn, layers, d, n_players, hist, heads, stem, Block):
     class Layer(nn.Module):
         def __init__(self):
             super().__init__()
@@ -274,8 +285,14 @@ def _build_transformer(torch, nn, layers, d, n_players, hist, heads):
     class Net(nn.Module):
         def __init__(self):
             super().__init__()
-            self.cfg = {"blocks": layers, "channels": d, "n_players": n_players, "hist": hist, "arch": "transformer", "heads": heads}
-            self.embed = nn.Linear(N_PLANES + 2 * hist, d)
+            self.cfg = {"blocks": layers, "channels": d, "n_players": n_players, "hist": hist, "arch": "transformer", "heads": heads,
+                        "stem": stem}
+            n_in = N_PLANES + 2 * hist
+            if stem:
+                self.conv = nn.Sequential(nn.Conv2d(n_in, 64, 3, padding=1, bias=False), nn.BatchNorm2d(64), nn.ReLU(),
+                                          *[Block(64) for _ in range(stem)])
+                n_in += 64
+            self.embed = nn.Linear(n_in, d)
             self.pos = nn.Parameter(torch.randn(64, d) * 0.02)
             self.elo = nn.Linear(2, d)
             self.body = nn.Sequential(*[Layer() for _ in range(layers)])
@@ -291,6 +308,8 @@ def _build_transformer(torch, nn, layers, d, n_players, hist, heads):
                 nn.init.zeros_(self.pl_bias.weight)
 
         def forward(self, x, elo, mask, player=None, ctx=None, aux=False):
+            if stem:
+                x = torch.cat([x, self.conv(x)], 1)
             tok = x.flatten(2).transpose(1, 2)  # (B, 64 squares, planes), square = rank * 8 + file
             h = self.embed(tok) + self.pos + self.elo(elo)[:, None, :]
             if hist:
