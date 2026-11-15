@@ -104,6 +104,7 @@ def pick_device(name):
 
 
 DEV = torch.device("cpu")
+AMP = False
 
 
 def run_eval(net, split, bs=2048):
@@ -114,7 +115,9 @@ def run_eval(net, split, bs=2048):
         for i in range(0, len(split), bs):
             j = split.idx[i:i + bs]
             x, e, m, t, pl, c, th = (v.to(DEV) for v in split.batch(j))
-            logits, tp = net(x, e, m, pl, c, aux=True)
+            with torch.autocast(DEV.type, dtype=torch.float16, enabled=AMP):
+                logits, tp = net(x, e, m, pl, c, aux=True)
+            tp = tp.float() if tp is not None else None
             if tp is not None:
                 th_p.append(tp.cpu().numpy())
                 th_t.append(th.cpu().numpy())
@@ -169,6 +172,7 @@ if __name__ == "__main__":
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--stem", type=int, default=0, help="transformer: conv blocks before the attention layers (hybrid)")
     ap.add_argument("--wd", type=float, default=1e-4, help="weight decay (0.01 suits the transformer)")
+    ap.add_argument("--amp", action="store_true", help="half precision (float16) on mps/cuda: faster, same results within noise")
     ap.add_argument("--context", action="store_true", help="stage C: last moves and clocks as input, think time as second output")
     ap.add_argument("--think-weight", type=float, default=0.1, help="weight of the think-time loss (with --context)")
     ap.add_argument("--mirror", action="store_true", help="left-right mirror augmentation for positions without castling rights")
@@ -177,6 +181,13 @@ if __name__ == "__main__":
     torch.set_num_threads(a.threads)
     torch.manual_seed(0)
     DEV = pick_device(a.device)
+    AMP = a.amp and DEV.type in ("mps", "cuda")
+    scaler = None
+    if AMP:
+        try:
+            scaler = torch.amp.GradScaler(DEV.type)
+        except Exception as ex:  # older torch without a scaler for this device: plain fp16 autocast
+            print(f"no gradient scaler for {DEV.type} ({ex}); autocast only", file=sys.stderr)
     z = dict(np.load(a.data))
     if a.train_shards:
         z.update(load_shards(a.train_shards))
@@ -232,15 +243,21 @@ if __name__ == "__main__":
         order = rng.permutation(train.idx)
         for i in range(0, len(order) - a.batch + 1, a.batch):
             x, e, m, t, pl, c, th = (v.to(DEV) for v in train.batch(order[i:i + a.batch]))
-            logits, th_pred = net(x, e, m, pl, c, aux=True)
+            with torch.autocast(DEV.type, dtype=torch.float16, enabled=AMP):
+                logits, th_pred = net(x, e, m, pl, c, aux=True)
             loss = torch.nn.functional.cross_entropy(logits, t)
             if th_pred is not None and a.think_weight > 0:
                 ok = torch.isfinite(th)
                 if ok.any():
-                    loss = loss + a.think_weight * torch.nn.functional.smooth_l1_loss(th_pred[ok], th[ok])
+                    loss = loss + a.think_weight * torch.nn.functional.smooth_l1_loss(th_pred.float()[ok], th[ok])
             opt.zero_grad()
-            loss.backward()
-            opt.step()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                opt.step()
             sched.step()
             step += 1
             if step % 500 == 0:

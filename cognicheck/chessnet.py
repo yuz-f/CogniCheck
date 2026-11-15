@@ -35,6 +35,7 @@ N_PLANES = 17
 N_TYPES = 73
 N_MOVES = N_TYPES * 64
 N_HIST = 8  # moves of history in stage C
+FUSED_ATTENTION = True  # torch's scaled_dot_product_attention kernel (same result as the explicit formula)
 N_CTX = 6
 PIECES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 _DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]  # (rank, file) steps
@@ -257,7 +258,7 @@ def _build_resnet(torch, nn, Block, blocks, channels, n_players, hist):
             logits = self.p2(torch.relu(self.p1(h))).flatten(1)  # (B, 73*64), index = type*64 + square
             if n_players and player is not None:
                 logits = logits + self.pl_bias(player)
-            logits = logits.masked_fill(~mask, -1e9)
+            logits = logits.float().masked_fill(~mask, -1e9)
             if aux:
                 think = self.t2(torch.relu(self.t1(h.mean((2, 3))))).squeeze(1) if hist else None
                 return logits, think
@@ -278,8 +279,12 @@ def _build_transformer(torch, nn, layers, d, n_players, hist, heads, stem, Block
         def forward(self, h):
             b = h.shape[0]
             q, k, v = self.qkv(self.n1(h)).view(b, 64, 3, heads, d // heads).permute(2, 0, 3, 1, 4)
-            att = torch.softmax(q @ k.transpose(-1, -2) / (d // heads) ** 0.5 + self.bias, dim=-1)
-            h = h + self.out((att @ v).transpose(1, 2).reshape(b, 64, d))
+            bias = self.bias.to(q.dtype)
+            if FUSED_ATTENTION:
+                o = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=bias.expand(b, -1, -1, -1))
+            else:
+                o = torch.softmax(q @ k.transpose(-1, -2) / (d // heads) ** 0.5 + bias, dim=-1) @ v
+            h = h + self.out(o.transpose(1, 2).reshape(b, 64, d))
             return h + self.ff(self.n2(h))
 
     class Net(nn.Module):
@@ -320,7 +325,7 @@ def _build_transformer(torch, nn, layers, d, n_players, hist, heads, stem, Block
             logits = self.head(h).transpose(1, 2).flatten(1)  # (B, 73*64), index = type*64 + square
             if n_players and player is not None:
                 logits = logits + self.pl_bias(player)
-            logits = logits.masked_fill(~mask, -1e9)
+            logits = logits.float().masked_fill(~mask, -1e9)
             if aux:
                 think = self.t2(torch.relu(self.t1(h.mean(1)))).squeeze(1) if hist else None
                 return logits, think
