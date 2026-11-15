@@ -15,6 +15,11 @@ to-squares of the last `hist` moves as extra planes, and N_CTX context numbers (
 time each side spent on its previous move, whether the game has clocks, the move number); and it
 predicts as a second output how long the player will think about this move. See context().
 
+Optionally (memory=True, with players) the network also gets the player's personal memory: for
+each legal move, how often this player chose it in exactly this position in their training games
+(personal_memory()). A small learned function of those counts is added to the move's logit, so
+"played Nf3 here 7 times out of 9" can raise Nf3 directly; it starts at zero.
+
 Optionally (n_players > 0) the network also knows who is moving: each player has a learned vector
 that shifts the first layer like the ratings, and a learned bias over the 4672 moves (a personal
 taste for particular moves, e.g. "likes 1.e4"). Index n_players is a shared slot for anyone else.
@@ -179,6 +184,47 @@ def context(game, ply, clock, legal, off, target, n_hist: int = N_HIST):
     return hist, ctx, think
 
 
+def personal_memory(tr: dict, te: dict, n_players: int):
+    """Counts of the player's own past choices in the same position, per legal move.
+
+    tr, te: dicts with planes, legal, off, target and mover (the player's index for their own
+    moves, n_players for anyone else). The table is built from the player's own training moves
+    only; a position is identified by its encoded planes (board, side to move, castling rights,
+    en passant). Training rows leave their own move out (leave-one-out), so a position seen once
+    in training looks exactly like a new position at test time.
+    Returns two int16 arrays aligned with tr["legal"] and te["legal"]."""
+    from collections import Counter, defaultdict
+
+    table = defaultdict(Counter)
+    mv_tr = tr["legal"][tr["off"][:-1] + tr["target"]]
+    own_tr = np.nonzero(tr["mover"] < n_players)[0]
+    for r in own_tr:
+        table[(int(tr["mover"][r]), tr["planes"][r].tobytes())][int(mv_tr[r])] += 1
+
+    def fill(d, rows, loo):
+        mem = np.zeros(len(d["legal"]), np.int16)
+        for r in rows:
+            cnt = table.get((int(d["mover"][r]), d["planes"][r].tobytes()))
+            if not cnt:
+                continue
+            a, b = int(d["off"][r]), int(d["off"][r + 1])
+            vals = np.array([cnt.get(int(x), 0) for x in d["legal"][a:b]], np.int16)
+            if loo:
+                vals[d["target"][r]] -= 1
+            mem[a:b] = vals
+        return mem
+
+    return fill(tr, own_tr, True), fill(te, np.nonzero(te["mover"] < n_players)[0], False)
+
+
+def _memory_bias(torch, layer, mem):
+    """Logit bonus per move from its memory count c (B, 4672) and the position's total n."""
+    n = mem.sum(1, keepdim=True)
+    has = (mem > 0).float()
+    f = torch.stack([torch.log1p(mem), mem / n.clamp(min=1), has, has * torch.log1p(n)], -1)
+    return layer(f).squeeze(-1)
+
+
 def history_planes(hist: np.ndarray) -> np.ndarray:
     """(B, n_hist, 2) squares -> (B, 2 * n_hist, 8, 8) uint8 planes (from, to for each move)."""
     b = len(hist)
@@ -195,7 +241,7 @@ def elo_input(elo_self: float, elo_oppo: float) -> np.ndarray:
 
 # ---------------------------------------------------------------------------- network (torch)
 def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0, arch: str = "resnet", heads: int = 8,
-          stem: int = 0):
+          stem: int = 0, memory: bool = False):
     """arch "resnet": `blocks` residual blocks of `channels` 3x3 convolutions.
     arch "transformer": the 64 squares are tokens of width `channels`; `blocks` pre-norm attention
     layers with `heads` heads, each with a learned bias for every (square, square) pair and head, so
@@ -206,9 +252,15 @@ def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0
     from torch import nn
 
     if arch == "transformer":
-        return _build_transformer(torch, nn, blocks, channels, n_players, hist, heads, stem, _block_class(torch, nn))
-    Block = _block_class(torch, nn)
-    return _build_resnet(torch, nn, Block, blocks, channels, n_players, hist)
+        net = _build_transformer(torch, nn, blocks, channels, n_players, hist, heads, stem, _block_class(torch, nn))
+    else:
+        net = _build_resnet(torch, nn, _block_class(torch, nn), blocks, channels, n_players, hist)
+    if memory:
+        net.pl_mem = nn.Linear(4, 1)  # "pl_" prefix: trained with the player parameters
+        nn.init.zeros_(net.pl_mem.weight)
+        nn.init.zeros_(net.pl_mem.bias)
+    net.cfg["memory"] = memory
+    return net
 
 
 def _block_class(torch, nn):
@@ -245,7 +297,7 @@ def _build_resnet(torch, nn, Block, blocks, channels, n_players, hist):
                 nn.init.zeros_(self.pl_vec.weight)
                 nn.init.zeros_(self.pl_bias.weight)
 
-        def forward(self, x, elo, mask, player=None, ctx=None, aux=False):
+        def forward(self, x, elo, mask, player=None, ctx=None, aux=False, mem=None):
             """x: (B,17+2*hist,8,8) float, elo: (B,2), mask: (B,4672) bool of legal moves, player: (B,)
             long (only with n_players), ctx: (B,N_CTX) (only with hist) -> masked logits, and with
             aux=True also the predicted think time (B,)."""
@@ -258,7 +310,10 @@ def _build_resnet(torch, nn, Block, blocks, channels, n_players, hist):
             logits = self.p2(torch.relu(self.p1(h))).flatten(1)  # (B, 73*64), index = type*64 + square
             if n_players and player is not None:
                 logits = logits + self.pl_bias(player)
-            logits = logits.float().masked_fill(~mask, -1e9)
+            logits = logits.float()
+            if mem is not None and hasattr(self, "pl_mem"):
+                logits = logits + _memory_bias(torch, self.pl_mem, mem)
+            logits = logits.masked_fill(~mask, -1e9)
             if aux:
                 think = self.t2(torch.relu(self.t1(h.mean((2, 3))))).squeeze(1) if hist else None
                 return logits, think
@@ -312,7 +367,7 @@ def _build_transformer(torch, nn, layers, d, n_players, hist, heads, stem, Block
                 nn.init.zeros_(self.pl_vec.weight)
                 nn.init.zeros_(self.pl_bias.weight)
 
-        def forward(self, x, elo, mask, player=None, ctx=None, aux=False):
+        def forward(self, x, elo, mask, player=None, ctx=None, aux=False, mem=None):
             if stem:
                 x = torch.cat([x, self.conv(x)], 1)
             tok = x.flatten(2).transpose(1, 2)  # (B, 64 squares, planes), square = rank * 8 + file
@@ -325,7 +380,10 @@ def _build_transformer(torch, nn, layers, d, n_players, hist, heads, stem, Block
             logits = self.head(h).transpose(1, 2).flatten(1)  # (B, 73*64), index = type*64 + square
             if n_players and player is not None:
                 logits = logits + self.pl_bias(player)
-            logits = logits.float().masked_fill(~mask, -1e9)
+            logits = logits.float()
+            if mem is not None and hasattr(self, "pl_mem"):
+                logits = logits + _memory_bias(torch, self.pl_mem, mem)
+            logits = logits.masked_fill(~mask, -1e9)
             if aux:
                 think = self.t2(torch.relu(self.t1(h.mean(1)))).squeeze(1) if hist else None
                 return logits, think

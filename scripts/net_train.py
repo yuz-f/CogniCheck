@@ -39,6 +39,7 @@ class Split:
         self.player = z.get(prefix + "mover", z.get(prefix + "player"))  # mover's cohort index (n_players = anyone else), or None
         self.unknown = 0
         self.hist = self.ctx = self.think = None  # stage C inputs (chessnet.context), set by add_context()
+        self.mem = None  # personal memory counts aligned with legal (chessnet.personal_memory)
         self.idx = np.arange(len(self.target)) if idx is None else idx
         self.mirror = None  # set to chessnet.mirror_lr_table() to augment
         self.rng = np.random.default_rng(1)
@@ -56,11 +57,14 @@ class Split:
         if self.hist is not None:
             x = np.concatenate([x, chessnet.history_planes(self.hist[j])], axis=1)
         mask = np.zeros((len(j), chessnet.N_MOVES), dtype=bool)
+        memc = np.zeros((len(j), chessnet.N_MOVES), np.float32) if self.mem is not None else None
         tgt = np.empty(len(j), np.int64)
         for r, k in enumerate(j):
             lm = self.legal[self.off[k]:self.off[k + 1]].astype(np.int64)
             mask[r, lm] = True
             tgt[r] = lm[self.target[k]]
+            if memc is not None:
+                memc[r, lm] = self.mem[self.off[k]:self.off[k + 1]]
         if self.mirror is not None:  # left-right mirror half of the positions without castling rights
             flip = ~x[:, 12:16].any(axis=(1, 2, 3)) & (self.rng.random(len(j)) < 0.5)
             if self.player is not None:  # a mirrored board would blur a player's personal move bias
@@ -69,11 +73,14 @@ class Split:
                 x[flip] = x[flip][:, :, :, ::-1]
                 mask[flip] = mask[flip][:, self.mirror]  # the table is its own inverse
                 tgt[flip] = self.mirror[tgt[flip]]
+                if memc is not None:
+                    memc[flip] = memc[flip][:, self.mirror]
         pl = self.player[j].astype(np.int64) if self.player is not None else np.full(len(j), self.unknown, np.int64)
         ctx = self.ctx[j] if self.ctx is not None else np.zeros((len(j), chessnet.N_CTX), np.float32)
         think = self.think[j] if self.think is not None else np.full(len(j), np.nan, np.float32)
         return (torch.from_numpy(x.astype(np.float32)), torch.from_numpy(self.elo[j]), torch.from_numpy(mask), torch.from_numpy(tgt),
-                torch.from_numpy(pl), torch.from_numpy(ctx), torch.from_numpy(think))
+                torch.from_numpy(pl), torch.from_numpy(ctx), torch.from_numpy(think),
+                torch.from_numpy(memc) if memc is not None else torch.zeros(0))
 
 
 def load_shards(folder):
@@ -114,9 +121,9 @@ def run_eval(net, split, bs=2048):
     with torch.no_grad():
         for i in range(0, len(split), bs):
             j = split.idx[i:i + bs]
-            x, e, m, t, pl, c, th = (v.to(DEV) for v in split.batch(j))
+            x, e, m, t, pl, c, th, mc = (v.to(DEV) for v in split.batch(j))
             with torch.autocast(DEV.type, dtype=torch.float16, enabled=AMP):
-                logits, tp = net(x, e, m, pl, c, aux=True)
+                logits, tp = net(x, e, m, pl, c, aux=True, mem=mc if mc.numel() else None)
             tp = tp.float() if tp is not None else None
             if tp is not None:
                 th_p.append(tp.cpu().numpy())
@@ -167,6 +174,7 @@ if __name__ == "__main__":
     ap.add_argument("--device", default="auto", help="auto, cpu, mps or cuda")
     ap.add_argument("--init", default="", help="start from a saved network (fine-tuning); its size overrides --blocks/--channels")
     ap.add_argument("--players", action="store_true", help="give the network the mover's identity (cohort data only)")
+    ap.add_argument("--memory", action="store_true", help="with --players: the player's own past moves in the same position as input")
     ap.add_argument("--player-lr", type=float, default=10.0, help="learning-rate multiplier for the new player parameters")
     ap.add_argument("--arch", default="resnet", help="resnet or transformer (then --blocks = layers, --channels = width)")
     ap.add_argument("--heads", type=int, default=8)
@@ -215,19 +223,34 @@ if __name__ == "__main__":
             sp.player = None
     if a.players and train.player is None:
         sys.exit("--players needs a cohort file with train_player (rebuild it with scripts/net_data.py)")
+    if a.memory:
+        if not a.players:
+            sys.exit("--memory needs --players")
+        d_tr = {k: z["train_" + k] for k in ("planes", "legal", "off", "target")}
+        d_tr["mover"] = z["train_player"]
+        d_te = {k: z["test_" + k] for k in ("planes", "legal", "off", "target")}
+        d_te["mover"] = z.get("test_mover", z["test_player"])
+        train.mem, test.mem = chessnet.personal_memory(d_tr, d_te, n_pl)
+        val.mem = train.mem
+        ev = test.idx
+        seen = np.array([test.mem[test.off[r]:test.off[r + 1]].sum() > 0 for r in ev])
+        top = np.array([test.mem[test.off[r]:test.off[r + 1]].argmax() == test.target[r] for r in ev])
+        print(f"personal memory: {seen.mean():.1%} of test decisions were seen before by the player; "
+              f"there the most frequent past move is right {top[seen].mean():.1%} of the time", file=sys.stderr)
     if a.mirror:
         train.mirror = chessnet.mirror_lr_table()
     if a.init:
         ck0 = torch.load(a.init, map_location="cpu")
         c0 = ck0["cfg"]
-        net = chessnet.build(c0["blocks"], c0["channels"], n_pl or c0.get("n_players", 0), c0.get("hist", 0), c0.get("arch", "resnet"), c0.get("heads", 8), c0.get("stem", 0))
+        net = chessnet.build(c0["blocks"], c0["channels"], n_pl or c0.get("n_players", 0), c0.get("hist", 0), c0.get("arch", "resnet"), c0.get("heads", 8), c0.get("stem", 0),
+                             a.memory or c0.get("memory", False))
         missing, _ = net.load_state_dict(ck0["state"], strict=False)
         if any(not k.startswith("pl_") for k in missing):
             sys.exit(f"{a.init} does not fit: missing {missing}")
         net = net.to(DEV)
         print(f"starting from {a.init}" + (f", new player parameters for {n_pl} players" if missing else ""), file=sys.stderr)
     else:
-        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0, a.arch, a.heads, a.stem).to(DEV)
+        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0, a.arch, a.heads, a.stem, a.memory).to(DEV)
     n_par = sum(p.numel() for p in net.parameters())
     steps = a.epochs * (len(train) // a.batch)
     pl_par = [p for k, p in net.named_parameters() if k.startswith("pl_")]
@@ -242,9 +265,9 @@ if __name__ == "__main__":
     for ep in range(a.epochs):
         order = rng.permutation(train.idx)
         for i in range(0, len(order) - a.batch + 1, a.batch):
-            x, e, m, t, pl, c, th = (v.to(DEV) for v in train.batch(order[i:i + a.batch]))
+            x, e, m, t, pl, c, th, mc = (v.to(DEV) for v in train.batch(order[i:i + a.batch]))
             with torch.autocast(DEV.type, dtype=torch.float16, enabled=AMP):
-                logits, th_pred = net(x, e, m, pl, c, aux=True)
+                logits, th_pred = net(x, e, m, pl, c, aux=True, mem=mc if mc.numel() else None)
             loss = torch.nn.functional.cross_entropy(logits, t)
             if th_pred is not None and a.think_weight > 0:
                 ok = torch.isfinite(th)
