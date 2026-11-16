@@ -97,7 +97,7 @@ def _init(share):
 def encode(texts: list[str]):
     """Encode a list of PGN game texts. Returns arrays for all their positions."""
     planes, elo, legal, nlegal, tgt, ply_a, clk, gid = [], [], [], [], [], [], [], []
-    mover, result, tc_a, names = [], [], [], {}
+    mover, result, tc_a, names, threat = [], [], [], {}, []
     for g_i, text in enumerate(texts):
         game = chess.pgn.read_game(io.StringIO(text))
         if game is None:
@@ -116,10 +116,12 @@ def encode(texts: list[str]):
         res = {"1-0": {chess.WHITE: 2, chess.BLACK: 0}, "0-1": {chess.WHITE: 0, chess.BLACK: 2},
                "1/2-1/2": {chess.WHITE: 1, chess.BLACK: 1}}.get(h.get("Result", ""), {chess.WHITE: -1, chess.BLACK: -1})
         board = game.board()
+        prev, last = None, None
         for ply, node in enumerate(game.mainline()):
             if ply >= MAX_PLIES:
                 break
             if board.legal_moves.count() > 1:
+                threat.append(np.packbits(chessnet.threat_planes(prev, board, last)))
                 moves, idx = chessnet.legal_indices(board)
                 es, eo = (w, b) if board.turn == chess.WHITE else (b, w)
                 planes.append(np.packbits(chessnet.planes(board)))
@@ -136,13 +138,15 @@ def encode(texts: list[str]):
             c = node.clock()
             if c is not None:
                 clocks[board.turn] = c
+            prev, last = board.copy(stack=False), node.move
             board.push(node.move)
     if not tgt:
         return None
     return {"planes": np.stack(planes), "elo": np.stack(elo).astype(np.float16), "legal": np.concatenate(legal).astype(np.int16),
             "nlegal": np.array(nlegal, np.int16), "target": np.array(tgt, np.int16), "ply": np.array(ply_a, np.int16),
             "clock": np.array(clk, np.float16), "game": np.array(gid, np.int32), "games": len(texts),
-            "mover": np.array(mover, np.int64), "result": np.array(result, np.int8), "tc": np.array(tc_a, np.float32), "names": names}
+            "mover": np.array(mover, np.int64), "result": np.array(result, np.int8), "tc": np.array(tc_a, np.float32), "names": names,
+            "threat": np.stack(threat)}
 
 
 def games_from_stream(url: str, names: set[str], share: float = 0.0, max_games: int = 0):
@@ -194,7 +198,7 @@ def games_from_stream(url: str, names: set[str], share: float = 0.0, max_games: 
 
 
 def write_shard(parts, k, game_base, out):
-    keys = ["planes", "elo", "legal", "nlegal", "target", "ply", "clock", "mover", "result", "tc"]
+    keys = ["planes", "elo", "legal", "nlegal", "target", "ply", "clock", "mover", "result", "tc", "threat"]
     d = {key: np.concatenate([p[key] for p in parts]) for key in keys}
     games, off = [], game_base
     for p in parts:

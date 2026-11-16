@@ -48,6 +48,7 @@ N_MOVES = N_TYPES * 64
 N_HIST = 8  # moves of history in stage C
 FUSED_ATTENTION = False  # torch's fused kernel gives the same result but was slower on Apple MPS (scripts/net_speed.py)
 N_CTX = 6
+N_THREAT = 5  # planes describing what the opponent's last move did (threat_planes)
 PIECES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 _DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]  # (rank, file) steps
 _KNIGHT = [(2, 1), (1, 2), (-1, 2), (-2, 1), (-2, -1), (-1, -2), (1, -2), (2, -1)]
@@ -102,6 +103,39 @@ def move_index(move: chess.Move, turn: bool) -> int:
 def legal_indices(board: chess.Board) -> tuple[list[chess.Move], np.ndarray]:
     moves = list(board.legal_moves)
     return moves, np.array([move_index(m, board.turn) for m in moves], dtype=np.int16)
+
+
+def _attacks(board: chess.Board, color: bool) -> int:
+    mask = 0
+    for sq in chess.SquareSet(board.occupied_co[color]):
+        mask |= int(board.attacks_mask(sq))
+    return mask
+
+
+def threat_planes(prev: chess.Board | None, board: chess.Board, last: chess.Move | None) -> np.ndarray:
+    """(N_THREAT, 64) bool: what the opponent's last move did, from the mover's side.
+
+      0  squares attacked by the piece that just moved (its direct intention)
+      1  the mover's pieces that are attacked now
+      2  the mover's pieces that are attacked now but were not before that move (new threats)
+      3  squares the opponent attacks now but did not before (incl. discovered attacks)
+      4  the last move's target square, if it was a capture
+
+    Only the rules of the game are used (attack sets), no engine. prev is the position before the
+    opponent's last move (None at the start of a game or when unknown)."""
+    out = np.zeros((N_THREAT, 64), dtype=bool)
+    if prev is None or last is None:
+        return out
+    me, opp = board.turn, not board.turn
+    att_now, att_before = _attacks(board, opp), _attacks(prev, opp)
+    mine = board.occupied_co[me]
+    masks = [int(board.attacks_mask(last.to_square)), att_now & mine, att_now & ~att_before & mine, att_now & ~att_before,
+             chess.BB_SQUARES[last.to_square] if prev.is_capture(last) else 0]
+    flip = me == chess.BLACK
+    for i, m in enumerate(masks):
+        for sq in chess.SquareSet(m):
+            out[i, chess.square_mirror(sq) if flip else sq] = True
+    return out
 
 
 def mirror_lr_table() -> np.ndarray:
@@ -265,7 +299,7 @@ def elo_input(elo_self: float, elo_oppo: float) -> np.ndarray:
 
 # ---------------------------------------------------------------------------- network (torch)
 def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0, arch: str = "resnet", heads: int = 8,
-          stem: int = 0, memory: bool = False, lapse: bool = False):
+          stem: int = 0, memory: bool = False, lapse: bool = False, threat: bool = False):
     """arch "resnet": `blocks` residual blocks of `channels` 3x3 convolutions.
     arch "transformer": the 64 squares are tokens of width `channels`; `blocks` pre-norm attention
     layers with `heads` heads, each with a learned bias for every (square, square) pair and head, so
@@ -275,10 +309,12 @@ def build(blocks: int = 6, channels: int = 64, n_players: int = 0, hist: int = 0
     import torch
     from torch import nn
 
+    extra = N_THREAT if threat else 0  # threat planes come after the history planes
     if arch == "transformer":
-        net = _build_transformer(torch, nn, blocks, channels, n_players, hist, heads, stem, _block_class(torch, nn))
+        net = _build_transformer(torch, nn, blocks, channels, n_players, hist, heads, stem, _block_class(torch, nn), extra)
     else:
-        net = _build_resnet(torch, nn, _block_class(torch, nn), blocks, channels, n_players, hist)
+        net = _build_resnet(torch, nn, _block_class(torch, nn), blocks, channels, n_players, hist, extra)
+    net.cfg["threat"] = threat
     if memory:
         net.pl_mem = nn.Linear(4, 1)  # "pl_" prefix: trained with the player parameters
         nn.init.zeros_(net.pl_mem.weight)
@@ -304,12 +340,12 @@ def _block_class(torch, nn):
     return Block
 
 
-def _build_resnet(torch, nn, Block, blocks, channels, n_players, hist):
+def _build_resnet(torch, nn, Block, blocks, channels, n_players, hist, extra=0):
     class Net(nn.Module):
         def __init__(self):
             super().__init__()
             self.cfg = {"blocks": blocks, "channels": channels, "n_players": n_players, "hist": hist}
-            self.stem = nn.Conv2d(N_PLANES + 2 * hist, channels, 3, padding=1, bias=False)
+            self.stem = nn.Conv2d(N_PLANES + 2 * hist + extra, channels, 3, padding=1, bias=False)
             self.stem_bn = nn.BatchNorm2d(channels)
             self.elo = nn.Linear(2, channels)
             self.body = nn.Sequential(*[Block(channels) for _ in range(blocks)])
@@ -351,7 +387,7 @@ def _build_resnet(torch, nn, Block, blocks, channels, n_players, hist):
     return Net()
 
 
-def _build_transformer(torch, nn, layers, d, n_players, hist, heads, stem, Block):
+def _build_transformer(torch, nn, layers, d, n_players, hist, heads, stem, Block, extra=0):
     class Layer(nn.Module):
         def __init__(self):
             super().__init__()
@@ -376,7 +412,7 @@ def _build_transformer(torch, nn, layers, d, n_players, hist, heads, stem, Block
             super().__init__()
             self.cfg = {"blocks": layers, "channels": d, "n_players": n_players, "hist": hist, "arch": "transformer", "heads": heads,
                         "stem": stem}
-            n_in = N_PLANES + 2 * hist
+            n_in = N_PLANES + 2 * hist + extra
             if stem:
                 self.conv = nn.Sequential(nn.Conv2d(n_in, 64, 3, padding=1, bias=False), nn.BatchNorm2d(64), nn.ReLU(),
                                           *[Block(64) for _ in range(stem)])

@@ -40,6 +40,7 @@ class Split:
         self.unknown = 0
         self.hist = self.ctx = self.think = None  # stage C inputs (chessnet.context), set by add_context()
         self.mem = None  # personal memory counts aligned with legal (chessnet.personal_memory)
+        self.threat = None  # packed threat planes (chessnet.threat_planes), set with --threat
         self.idx = np.arange(len(self.target)) if idx is None else idx
         self.mirror = None  # set to chessnet.mirror_lr_table() to augment
         self.rng = np.random.default_rng(1)
@@ -56,6 +57,9 @@ class Split:
         x = np.unpackbits(self.planes[j], axis=1)[:, : chessnet.N_PLANES * 64].reshape(-1, chessnet.N_PLANES, 8, 8)
         if self.hist is not None:
             x = np.concatenate([x, chessnet.history_planes(self.hist[j])], axis=1)
+        if self.threat is not None:
+            tp = np.unpackbits(self.threat[j], axis=1)[:, : chessnet.N_THREAT * 64].reshape(-1, chessnet.N_THREAT, 8, 8)
+            x = np.concatenate([x, tp], axis=1)
         mask = np.zeros((len(j), chessnet.N_MOVES), dtype=bool)
         memc = np.zeros((len(j), chessnet.N_MOVES), np.float32) if self.mem is not None else None
         tgt = np.empty(len(j), np.int64)
@@ -91,6 +95,8 @@ def load_shards(folder):
          "train_legal": np.concatenate([p["legal"] for p in parts]), "train_target": np.concatenate([p["target"] for p in parts]),
          "train_game": np.concatenate([p["game"] for p in parts]), "train_ply": np.concatenate([p["ply"] for p in parts]),
          "train_clock": np.concatenate([p["clock"] for p in parts])}
+    if all("threat" in p.files for p in parts):
+        d["train_threat"] = np.concatenate([p["threat"] for p in parts])
     offs, base = [], 0
     for p in parts:
         offs.append(p["off"][:-1] + base)
@@ -183,6 +189,7 @@ if __name__ == "__main__":
     ap.add_argument("--wd", type=float, default=1e-4, help="weight decay (0.01 suits the transformer)")
     ap.add_argument("--amp", action="store_true", help="half precision (float16) on mps/cuda: faster, same results within noise")
     ap.add_argument("--context", action="store_true", help="stage C: last moves and clocks as input, think time as second output")
+    ap.add_argument("--threat", action="store_true", help="with --context: planes of what the opponent's last move threatens")
     ap.add_argument("--think-weight", type=float, default=0.1, help="weight of the think-time loss (with --context)")
     ap.add_argument("--mirror", action="store_true", help="left-right mirror augmentation for positions without castling rights")
     ap.add_argument("--train-shards", default="", help="folder of Lichess shards to train on instead of the cohort games")
@@ -210,8 +217,15 @@ if __name__ == "__main__":
     test = Split(z, "test_")
     if "test_eval" in z:  # newer cohort files keep the opponents' moves of held-out games as history rows
         test.idx = np.nonzero(z["test_eval"])[0]
-    if a.init and not a.context:
-        a.context = bool(torch.load(a.init, map_location="cpu")["cfg"].get("hist", 0))
+    if a.init:
+        c_init = torch.load(a.init, map_location="cpu")["cfg"]
+        a.context = a.context or bool(c_init.get("hist", 0))
+        a.threat = a.threat or bool(c_init.get("threat", False))
+    if a.threat:
+        if "train_threat" not in z or "test_threat" not in z:
+            sys.exit("--threat needs data with threat planes (net_lichess.py / net_data.py from this version)")
+        train.threat = val.threat = z["train_threat"]
+        test.threat = z["test_threat"]
     if a.context:
         train.add_context(z, "train_")
         val.hist, val.ctx, val.think = train.hist, train.ctx, train.think
@@ -244,14 +258,22 @@ if __name__ == "__main__":
         ck0 = torch.load(a.init, map_location="cpu")
         c0 = ck0["cfg"]
         net = chessnet.build(c0["blocks"], c0["channels"], n_pl or c0.get("n_players", 0), c0.get("hist", 0), c0.get("arch", "resnet"), c0.get("heads", 8), c0.get("stem", 0),
-                             a.memory or c0.get("memory", False), a.lapse or c0.get("lapse", False))
-        missing, _ = net.load_state_dict(ck0["state"], strict=False)
+                             a.memory or c0.get("memory", False), a.lapse or c0.get("lapse", False), a.threat or c0.get("threat", False))
+        st, own = dict(ck0["state"]), net.state_dict()
+        for k, v in own.items():  # new input planes (e.g. --threat): keep the old weights, new input channels start at zero
+            if k in st and st[k].shape != v.shape and st[k].dim() == v.dim() and st[k].shape[0] == v.shape[0] \
+                    and st[k].shape[2:] == v.shape[2:] and st[k].shape[1] < v.shape[1]:
+                w = torch.zeros_like(v)
+                w[:, : st[k].shape[1]] = st[k]
+                st[k] = w
+                print(f"  {k}: {tuple(ck0['state'][k].shape)} -> {tuple(v.shape)}, new inputs start at zero", file=sys.stderr)
+        missing, _ = net.load_state_dict(st, strict=False)
         if any(not k.startswith(("pl_", "lapse_")) for k in missing):
             sys.exit(f"{a.init} does not fit: missing {missing}")
         net = net.to(DEV)
         print(f"starting from {a.init}" + (f", new parameters: {sorted({k.split('.')[0] for k in missing})}" if missing else ""), file=sys.stderr)
     else:
-        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0, a.arch, a.heads, a.stem, a.memory, a.lapse).to(DEV)
+        net = chessnet.build(a.blocks, a.channels, n_pl, chessnet.N_HIST if a.context else 0, a.arch, a.heads, a.stem, a.memory, a.lapse, a.threat).to(DEV)
     n_par = sum(p.numel() for p in net.parameters())
     steps = a.epochs * (len(train) // a.batch)
     pl_par = [p for k, p in net.named_parameters() if k.startswith("pl_")]

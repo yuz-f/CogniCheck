@@ -53,6 +53,7 @@ def encode_game(game):
     has_clk = any(n.clock() is not None for n in game.mainline())
     clocks = {chess.WHITE: base, chess.BLACK: base}
     board = game.board()
+    prev, last = None, None
     for ply, node in enumerate(game.mainline()):
         if ply >= MAX_PLIES:
             break
@@ -62,10 +63,12 @@ def encode_game(game):
             w, b = _elo(h, "White"), _elo(h, "Black")
             es, eo = (w, b) if board.turn == chess.WHITE else (b, w)
             clk = (clocks[board.turn] / base, clocks[not board.turn] / base) if has_clk else (np.nan, np.nan)
-            rec.append((np.packbits(chessnet.planes(board)), chessnet.elo_input(es, eo), idx, tgt, ply, board.copy(stack=False), clk))
+            rec.append((np.packbits(chessnet.planes(board)), chessnet.elo_input(es, eo), idx, tgt, ply, board.copy(stack=False), clk,
+                        np.packbits(chessnet.threat_planes(prev, board, last))))
         c = node.clock()
         if c is not None:
             clocks[board.turn] = c
+        prev, last = board.copy(stack=False), node.move
         board.push(node.move)
     return rec
 
@@ -86,16 +89,16 @@ def player_data(p, exclude):
         color = pg.color
         recs = encode_game(pg.game)
         if gi in hold:
-            for planes, elo, idx, tgt, ply, board, clk in recs:
+            for planes, elo, idx, tgt, ply, board, clk, thr in recs:
                 own = board.turn == color
                 test.append((planes, elo, idx, tgt, PHASES[phase(board)], own and bool(eng_loss[chosen[k]] >= 2), k if own else -1,
-                             own, ply, clk, gi))
+                             own, ply, clk, gi, thr))
                 k += own
         else:
             k += sum(1 for r in recs if r[5].turn == color)
             if site(pg.game) not in exclude:
-                train.extend((planes, elo, idx, tgt, site(pg.game), board.turn, color, ply, clk)
-                             for planes, elo, idx, tgt, ply, board, clk in recs)
+                train.extend((planes, elo, idx, tgt, site(pg.game), board.turn, color, ply, clk, thr)
+                             for planes, elo, idx, tgt, ply, board, clk, thr in recs)
     if k != len(starts):
         raise RuntimeError(f"{p['id']}: {k} decisions vs {len(starts)} in the analysis")
     return p["id"], train, test
@@ -146,15 +149,16 @@ if __name__ == "__main__":
     gid = {}
     tr_game = np.array([gid.setdefault(r[4], len(gid)) for r in train], np.int32)
     tgid = {}
-    te_game = np.array([tgid.setdefault((r[11], r[10]), len(tgid)) for r in test], np.int32)  # (player, game): a game held out for two players appears twice
+    te_game = np.array([tgid.setdefault((r[12], r[10]), len(tgid)) for r in test], np.int32)  # (player, game): a game held out for two players appears twice
     n_pl = len(res)
     tr = pack(train, {"player": np.array(tr_player, np.int16), "game": tr_game, "ply": np.array([r[7] for r in train], np.int16),
-                      "clock": np.array([r[8] for r in train], np.float16)})
+                      "clock": np.array([r[8] for r in train], np.float16), "threat": np.stack([r[9] for r in train])})
     te = pack(test, {"phase": np.array([r[4] for r in test], np.int8), "blunder": np.array([r[5] for r in test]),
                      "decision": np.array([r[6] for r in test], np.int32), "eval": np.array([r[7] for r in test]),
-                     "player": np.array([r[11] for r in test], np.int16),
-                     "mover": np.array([r[11] if r[7] else n_pl for r in test], np.int16),
-                     "game": te_game, "ply": np.array([r[8] for r in test], np.int16), "clock": np.array([r[9] for r in test], np.float16)})
+                     "player": np.array([r[12] for r in test], np.int16),
+                     "mover": np.array([r[12] if r[7] else n_pl for r in test], np.int16),
+                     "game": te_game, "ply": np.array([r[8] for r in test], np.int16), "clock": np.array([r[9] for r in test], np.float16),
+                     "threat": np.stack([r[11] for r in test])})
     np.savez(OUT / "cohort.npz", **{"train_" + k: v for k, v in tr.items()}, **{"test_" + k: v for k, v in te.items()},
              player_ids=np.array([r[0] for r in res]))
     print(f"train {len(train)} positions from {len(seen)} games; test {int(te['eval'].sum())} decisions of {len(res)} players "
